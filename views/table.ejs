@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Donation List</title>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.0/css/all.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div class="header-left">
+        <div class="menu-container">
+          <button class="menu-button" onclick="toggleMenu()">
+            <i class="fas fa-bars"></i>
+          </button>
+          <div class="dropdown-menu" id="dropdownMenu">
+            <a href="#" onclick="openOrganizationDialog()">
+              <i class="fas fa-building"></i>
+              Organization Settings
+            </a>
+            <a href="#" onclick="openLogoDialog()">
+              <i class="fas fa-image"></i>
+              Logo
+            </a>
+          </div>
+        </div>
+        <h1>Donation List</h1>
+      </div>
+      <div class="header-right">
+        <button class="sync-button" onclick="syncWithQuickbooks()">
+          <i class="fas fa-sync-alt"></i>
+          Sync with Quickbooks
+        </button>
+        <button class="logout-button" onclick="logoutFromQuickbooks()" style="background-color: #dc3545; margin-left: 10px;">
+          <i class="fas fa-sign-out-alt"></i>
+          Logout
+        </button>
+      </div>
+    </div>
+    <table>
+      <caption>
+        <div class="table-header">
+          <h2>Donations</h2>
+          <div class="search-container">
+            <input type="text" id="tableSearch" placeholder="Search donations..." class="search-input" onkeyup="filterTable()">
+            <div class="search-suggestions" id="searchSuggestions"></div>
+          </div>
+        </div>
+      </caption>
+     
+      <thead>
+        <tr>
+          <th class="sortable" data-column="date" onclick="sortTable('date')">
+            Date <i class="fas fa-sort"></i>
+          </th>
+          <th class="sortable" data-column="donor_name" onclick="sortTable('donor_name')">
+            Name <i class="fas fa-sort"></i>
+          </th>
+          <th class="sortable" data-column="description" onclick="sortTable('description')">
+            Description <i class="fas fa-sort"></i>
+          </th>
+          <th class="sortable" data-column="amount" onclick="sortTable('amount')">
+            Amount <i class="fas fa-sort"></i>
+          </th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% data.forEach(function(row) { %>
+          <tr>
+            <td>
+              <% if (row.date) { %>
+                <% 
+                  const date = new Date(row.date);
+                  const month = (date.getMonth() + 1).toString().padStart(2, '0');
+                  const day = date.getDate().toString().padStart(2, '0');
+                  const year = date.getFullYear().toString().slice(-2);
+                  const formattedDate = `${month}-${day}-${year}`;
+                %>
+                <%= formattedDate %>
+              <% } else { %>
+                -
+              <% } %>
+            </td>
+            <td><%= row.donor_name %></td>
+            <td>
+              <% if (row.hasMultipleItems) { %>
+                <a href="#" class="multiple-items-link" onclick="showTransactionItems('<%= row.id %>')">
+                  Multiple Donations
+                </a>
+              <% } else { %>
+                <span class="editable-description" 
+                      contenteditable="true" 
+                      data-transaction-id="<%= row.id %>"
+                      data-item-id="<%= row.itemId || '' %>"
+                      onblur="saveDescription(this)"
+                      onkeydown="handleDescriptionKeydown(event, this)"><%= row.description || '' %></span>
+              <% } %>
+            </td>
+            <td><%= new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(parseFloat(row.amount) || 0) %></td>
+            <td>
+              <% if (row.hasReceipt) { %>
+                <i class="fa-regular fa-file-pdf icon" 
+                   title="View Receipt" 
+                   onclick="openReceipt('<%= row.id %>')"></i>
+              <% } %>
+              <i class="fa-solid fa-receipt icon" 
+                 title="Generate Receipt" 
+                 onclick="generateReceipt('<%= row.id %>')"
+                 style="<%= row.hasReceipt ? 'margin-left: 10px;' : '' %>"></i>
+              <% if (row.hasReceipt) { %>
+                <i class="fas fa-envelope icon" 
+                   title="Email Receipt" 
+                   onclick="openEmailDialog('<%= row.id %>')"
+                   style="margin-left: 10px; color: #007bff;"></i>
+              <% } %>
+            </td>
+          </tr>
+        <% }); %>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- PDF Viewer Modal -->
+  <div id="pdfModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="modalTitle">Receipt</h2>
+        <span class="close" onclick="closePdfModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div id="pdfContainer">
+          <iframe id="pdfViewer" width="100%" frameborder="0"></iframe>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closePdfModal()">Close</button>
+        <button class="btn btn-primary" onclick="downloadPdf()">Download PDF</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Organization Settings Modal -->
+  <div id="organizationModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Organization Settings</h2>
+        <span class="close" onclick="closeOrganizationModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <form id="organizationForm">
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="orgName">Organization Name *</label>
+              <input type="text" id="orgName" name="name" required>
+            </div>
+            <div class="form-group">
+              <label for="orgEin">EIN (Employer Identification Number)</label>
+              <input type="text" id="orgEin" name="ein" placeholder="XX-XXXXXXX">
+            </div>
+          </div>
+          
+          <div class="form-group">
+            <label for="orgAddress">Address</label>
+            <input type="text" id="orgAddress" name="address">
+          </div>
+          
+          <div class="form-row-3">
+            <div class="form-group">
+              <label for="orgCity">City</label>
+              <input type="text" id="orgCity" name="city">
+            </div>
+            <div class="form-group">
+              <label for="orgState">State</label>
+              <input type="text" id="orgState" name="state" maxlength="2">
+            </div>
+            <div class="form-group">
+              <label for="orgZip">ZIP Code</label>
+              <input type="text" id="orgZip" name="zip">
+            </div>
+          </div>
+          
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="orgEmail">Email</label>
+              <input type="email" id="orgEmail" name="email">
+            </div>
+            <div class="form-group">
+              <label for="orgPhone">Phone</label>
+              <input type="tel" id="orgPhone" name="phone" placeholder="(555) 123-4567">
+              <small style="color: #666; font-size: 12px; margin-top: 5px; display: block;">Format: (xxx) xxx-xxxx</small>
+            </div>
+          </div>
+          
+          <div class="form-row-2">
+            <div class="form-group">
+              <label for="orgContact">Primary Contact</label>
+              <input type="text" id="orgContact" name="contact">
+            </div>
+            <div class="form-group">
+              <label for="orgUrl">Website URL</label>
+              <input type="url" id="orgUrl" name="url" placeholder="https://www.example.com">
+            </div>
+          </div>
+          
+          <div class="form-group">
+            <label for="orgType">Organization Type *</label>
+            <select id="orgType" name="type" required>
+              <option value="Non-Profit">Non-Profit</option>
+              <option value="For-Profit">For-Profit</option>
+            </select>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeOrganizationModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveOrganization()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Logo Management Modal -->
+  <div id="logoModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Logo Management</h2>
+        <span class="close" onclick="closeLogoModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <form id="logoForm">
+          <div class="logo-section">
+            <div class="logo-preview">
+              <div id="logoPreview" class="logo-placeholder">
+                <i class="fas fa-image"></i>
+                <p>No logo uploaded</p>
+              </div>
+            </div>
+            <div class="logo-controls">
+              <div class="form-group">
+                <label for="logoFile">Upload Logo</label>
+                <input type="file" id="logoFile" accept="image/*" onchange="previewLogo(this)">
+                <small>Supported formats: PNG, JPG, JPEG, GIF (max 5MB, max 2048x2048px)</small>
+                <div id="fileInfo" class="file-info" style="display: none; margin-top: 5px; padding: 5px; background: #f8f9fa; border-radius: 3px; font-size: 12px;">
+                  <span id="fileName"></span> - <span id="fileSize"></span>
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="logoPosition">Logo Position</label>
+                <select id="logoPosition" name="position">
+                  <option value="top-left">Top Left</option>
+                  <option value="top-center">Top Center</option>
+                  <option value="top-right">Top Right</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label for="logoWidth">Logo Width (px)</label>
+                <input type="number" id="logoWidth" name="width" min="50" max="300" value="150">
+              </div>
+              <div class="form-group">
+                <label for="logoHeight">Logo Height (px)</label>
+                <input type="number" id="logoHeight" name="height" min="30" max="200" value="80">
+              </div>
+              <button class="btn btn-danger" onclick="deleteLogo()" id="deleteLogoBtn" style="display: none;">
+                <i class="fas fa-trash"></i>
+                Delete Logo
+              </button>
+            </div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeLogoModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveLogo()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Email Receipt Modal -->
+  <div id="emailModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Email Receipt</h2>
+        <span class="close" onclick="closeEmailModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label for="emailAddress">Email Address:</label>
+          <input type="email" id="emailAddress" readonly>
+        </div>
+        <div class="form-group">
+          <label for="emailSubject">Subject:</label>
+          <input type="text" id="emailSubject" value="Your Donation Receipt">
+        </div>
+        <div class="form-group">
+          <label for="emailMessage">Message:</label>
+          <textarea id="emailMessage" rows="4" placeholder="Optional personal message..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeEmailModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="sendReceiptEmail()">Send Email</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Transaction Items Modal -->
+  <div id="itemsModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Transaction Items</h2>
+        <span class="close" onclick="closeItemsModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <div id="itemsList">
+          <!-- Items will be populated here -->
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeItemsModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/js/script.js"></script>
+</body>
+</html> 
