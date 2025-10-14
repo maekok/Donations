@@ -48,9 +48,9 @@ app.get('/template', (req, res) => {
 // Basic route for Hello World
 app.get('/', async (req, res) => {
   try {
-    let transactions;
+    let transactions = [];
     
-    // Get organization ID from realmId cookie if available
+    // Only load transactions if logged into QuickBooks
     if (req.cookies && req.cookies.quickbooks_realmId) {
       const realmId = req.cookies.quickbooks_realmId;
       console.log('🔍 Getting transactions for realmId:', realmId);
@@ -70,29 +70,9 @@ app.get('/', async (req, res) => {
         transactions = await db.getAllTransactions();
       }
     } else {
-      // No active QuickBooks connection - check for last organization ID
-      if (req.cookies && req.cookies.lastOrganizationId) {
-        const lastOrganizationId = parseInt(req.cookies.lastOrganizationId);
-        console.log('🔍 No active QuickBooks connection, using last organization ID:', lastOrganizationId);
-        
-        try {
-          const lastOrganization = await db.getOrganizationById(lastOrganizationId);
-          if (lastOrganization) {
-            console.log('✅ Found last organization:', lastOrganization.name, '(ID:', lastOrganizationId + ')');
-            transactions = await db.getTransactionsByOrganizationId(lastOrganizationId);
-          } else {
-            console.log('⚠️ Last organization not found, fetching all transactions');
-            transactions = await db.getAllTransactions();
-          }
-        } catch (orgError) {
-          console.error('❌ Error getting last organization:', orgError.message);
-          console.log('⚠️ Falling back to all transactions');
-          transactions = await db.getAllTransactions();
-        }
-      } else {
-        console.log('⚠️ No realmId or lastOrganizationId cookie found, fetching all transactions');
-        transactions = await db.getAllTransactions();
-      }
+      // Not logged into QuickBooks - show empty transaction list
+      console.log('ℹ️  Not logged into QuickBooks, showing empty transaction list');
+      transactions = [];
     }
     
     // Group transactions by ID and collect items
@@ -161,9 +141,13 @@ app.get('/', async (req, res) => {
     // Check if this is a redirect from QuickBooks connection success
     const quickbooksConnected = req.query.quickbooks_connected === 'true';
     
+    // Check if user is logged into QuickBooks
+    const isLoggedInToQuickbooks = !!(req.cookies && req.cookies.quickbooks_realmId);
+    
     res.render('table', { 
       data,
       quickbooksConnected: quickbooksConnected,
+      isLoggedInToQuickbooks: isLoggedInToQuickbooks,
       transactionItems: JSON.stringify(Array.from(transactionMap.values()).reduce((acc, transaction) => {
         acc[transaction.id] = transaction.items;
         return acc;
@@ -179,9 +163,9 @@ app.get('/', async (req, res) => {
 // API routes for transaction management
 app.get('/api/transactions', async (req, res) => {
   try {
-    let transactions;
+    let transactions = [];
     
-    // Get organization ID from realmId cookie if available
+    // Only load transactions if logged into QuickBooks
     if (req.cookies && req.cookies.quickbooks_realmId) {
       const realmId = req.cookies.quickbooks_realmId;
       console.log('🔍 API: Getting transactions for realmId:', realmId);
@@ -201,29 +185,9 @@ app.get('/api/transactions', async (req, res) => {
         transactions = await db.getAllTransactions();
       }
     } else {
-      // No active QuickBooks connection - check for last organization ID
-      if (req.cookies && req.cookies.lastOrganizationId) {
-        const lastOrganizationId = parseInt(req.cookies.lastOrganizationId);
-        console.log('🔍 API: No active QuickBooks connection, using last organization ID:', lastOrganizationId);
-        
-        try {
-          const lastOrganization = await db.getOrganizationById(lastOrganizationId);
-          if (lastOrganization) {
-            console.log('✅ API: Found last organization:', lastOrganization.name, '(ID:', lastOrganizationId + ')');
-            transactions = await db.getTransactionsByOrganizationId(lastOrganizationId);
-          } else {
-            console.log('⚠️ API: Last organization not found, fetching all transactions');
-            transactions = await db.getAllTransactions();
-          }
-        } catch (orgError) {
-          console.error('❌ API: Error getting last organization:', orgError.message);
-          console.log('⚠️ API: Falling back to all transactions');
-          transactions = await db.getAllTransactions();
-        }
-      } else {
-        console.log('⚠️ API: No realmId or lastOrganizationId cookie found, fetching all transactions');
-        transactions = await db.getAllTransactions();
-      }
+      // Not logged into QuickBooks - return empty array
+      console.log('ℹ️  API: Not logged into QuickBooks, returning empty transaction list');
+      transactions = [];
     }
     
     res.json(transactions);

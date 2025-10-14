@@ -693,6 +693,12 @@ function logoutFromQuickbooks() {
     if (data.message) {
       showNotification(data.message, 'success');
       
+      // Clear the transaction table immediately
+      const tbody = document.querySelector('table tbody');
+      if (tbody) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 40px; color: #999;">No transactions found. Connect to QuickBooks to load transactions.</td></tr>';
+      }
+      
       // Refresh the page to show logged-out state
       setTimeout(() => {
         window.location.reload();
@@ -2095,3 +2101,74 @@ function setupEinFormatting() {
     }
   });
 }
+
+// Welcome Modal Functions
+function showWelcomeModal() {
+  const welcomeModal = document.getElementById('welcomeModal');
+  if (welcomeModal) {
+    welcomeModal.style.display = 'block';
+  }
+}
+
+function closeWelcomeModal() {
+  const welcomeModal = document.getElementById('welcomeModal');
+  if (welcomeModal) {
+    welcomeModal.style.display = 'none';
+  }
+}
+
+function updateWelcomePreference() {
+  const dontShowAgain = document.getElementById('dontShowAgain');
+  if (dontShowAgain && dontShowAgain.checked) {
+    localStorage.setItem('hideWelcomeDialog', 'true');
+  } else {
+    localStorage.removeItem('hideWelcomeDialog');
+  }
+}
+
+// Check if we should show the welcome dialog on page load
+function checkWelcomeDialog() {
+  const hideWelcome = localStorage.getItem('hideWelcomeDialog');
+  
+  // Show welcome dialog if:
+  // 1. User hasn't chosen to hide it
+  // 2. Not logged into QuickBooks (no realmId cookie)
+  if (!hideWelcome) {
+    // Check if there are any transactions - if none, show welcome
+    const tableBody = document.querySelector('table tbody');
+    if (tableBody) {
+      const rows = tableBody.querySelectorAll('tr');
+      // Show welcome if there are no transaction rows or only the "no transactions" message
+      if (rows.length === 0 || (rows.length === 1 && rows[0].cells.length === 1)) {
+        setTimeout(() => {
+          showWelcomeModal();
+        }, 500); // Small delay for better UX
+      }
+    }
+  }
+}
+
+// Initialize welcome dialog check on page load
+document.addEventListener('DOMContentLoaded', function() {
+  checkWelcomeDialog();
+  
+  // Close modal when clicking outside
+  const welcomeModal = document.getElementById('welcomeModal');
+  if (welcomeModal) {
+    window.addEventListener('click', function(event) {
+      if (event.target === welcomeModal) {
+        closeWelcomeModal();
+      }
+    });
+  }
+  
+  // Close modal with Escape key
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape') {
+      const welcomeModal = document.getElementById('welcomeModal');
+      if (welcomeModal && welcomeModal.style.display === 'block') {
+        closeWelcomeModal();
+      }
+    }
+  });
+});
