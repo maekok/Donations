@@ -3,7 +3,7 @@ const path = require('path');
 const Encryption = require('./encryption');
 
 // Database file path
-const dbPath = path.join(__dirname, 'data.db');
+const dbPath = path.join(__dirname, 'data', 'data.db');
 
 // Create database connection
 const db = new sqlite3.Database(dbPath, (err) => {
@@ -33,24 +33,11 @@ function initDatabase() {
     )
   `;
 
-  // Create users table if it doesn't exist
-  const createUsersTableSQL = `
-    CREATE TABLE IF NOT EXISTS users (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      email TEXT NOT NULL,
-      address TEXT,
-      companyid INTEGER,
-      playerId TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `;
-
   // Create donors table if it doesn't exist
   const createDonorsTableSQL = `
     CREATE TABLE IF NOT EXISTS donors (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      qb_customer_id TEXT UNIQUE NOT NULL,
+      qb_customer_id TEXT NOT NULL,
       name TEXT NOT NULL,
       email TEXT,
       phone TEXT,
@@ -61,8 +48,11 @@ function initDatabase() {
       country TEXT,
       company TEXT,
       notes TEXT,
+      organizationId INTEGER,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (organizationId) REFERENCES organizations (id),
+      UNIQUE(qb_customer_id, organizationId)
     )
   `;
 
@@ -138,6 +128,33 @@ function initDatabase() {
         const addLineNumColumnSQL = `ALTER TABLE transaction_items ADD COLUMN lineNum INTEGER`;
         const addUnitPriceColumnSQL = `ALTER TABLE transaction_items ADD COLUMN unitPrice DECIMAL(10,2)`;
 
+  // Create feedback table if it doesn't exist
+  const createFeedbackTableSQL = `
+    CREATE TABLE IF NOT EXISTS feedback (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      organizationId INTEGER,
+      feedback TEXT NOT NULL,
+      email TEXT,
+      rating INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (organizationId) REFERENCES organizations (id)
+    )
+  `;
+
+  // Create options table if it doesn't exist
+  const createOptionsTableSQL = `
+    CREATE TABLE IF NOT EXISTS options (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      organizationId INTEGER,
+      key TEXT NOT NULL,
+      value TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (organizationId) REFERENCES organizations (id),
+      UNIQUE(organizationId, key)
+    )
+  `;
+
   // Create transactions table first
   db.run(createTransactionsTableSQL, (err) => {
     if (err) {
@@ -145,104 +162,97 @@ function initDatabase() {
     } else {
       console.log('✅ Transactions table created or already exists');
       
-      // Create users table
-      db.run(createUsersTableSQL, (err) => {
+      // Create donors table
+      db.run(createDonorsTableSQL, (err) => {
         if (err) {
-          console.error('Error creating users table:', err.message);
+          console.error('Error creating donors table:', err.message);
         } else {
-          console.log('✅ Users table created or already exists');
+          console.log('✅ Donors table created or already exists');
           
-          // Create donors table
-          db.run(createDonorsTableSQL, (err) => {
+          // Create organization table
+          db.run(createOrganizationTableSQL, (err) => {
             if (err) {
-              console.error('Error creating donors table:', err.message);
+              console.error('Error creating organization table:', err.message);
             } else {
-              console.log('✅ Donors table created or already exists');
+              console.log('✅ Organization table created or already exists');
               
-              // Create organization table
-              db.run(createOrganizationTableSQL, (err) => {
+              // Migration: Add qborganizationid column if it doesn't exist
+              db.run('ALTER TABLE organizations ADD COLUMN qborganizationid TEXT', (err) => {
+                if (err && !err.message.includes('duplicate column name')) {
+                  console.error('Error adding qborganizationid column:', err.message);
+                } else if (!err) {
+                  console.log('✅ Added qborganizationid column to organizations table');
+                }
+              });
+              
+              // Create receipts table
+              db.run(createReceiptsTableSQL, (err) => {
                 if (err) {
-                  console.error('Error creating organization table:', err.message);
+                  console.error('Error creating receipts table:', err.message);
                 } else {
-                  console.log('✅ Organization table created or already exists');
+                  console.log('✅ Receipts table created or already exists');
                   
-                  // Migration: Add qborganizationid column if it doesn't exist
-                  db.run('ALTER TABLE organizations ADD COLUMN qborganizationid TEXT', (err) => {
-                    if (err && !err.message.includes('duplicate column name')) {
-                      console.error('Error adding qborganizationid column:', err.message);
+                  // Migration: Drop receipt_filename column if it exists
+                  db.run('ALTER TABLE receipts DROP COLUMN receipt_filename', (err) => {
+                    if (err && !err.message.includes('no such column')) {
+                      console.error('Error dropping receipt_filename column:', err.message);
                     } else if (!err) {
-                      console.log('✅ Added qborganizationid column to organizations table');
+                      console.log('✅ Dropped receipt_filename column from receipts table');
                     }
                   });
                   
-                  // Create receipts table
-                  db.run(createReceiptsTableSQL, (err) => {
+                  // Create logos table
+                  db.run(createLogosTableSQL, (err) => {
                     if (err) {
-                      console.error('Error creating receipts table:', err.message);
+                      console.error('Error creating logos table:', err.message);
                     } else {
-                      console.log('✅ Receipts table created or already exists');
+                      console.log('✅ Logos table created or already exists');
                       
-                      // Migration: Drop receipt_filename column if it exists
-                      db.run('ALTER TABLE receipts DROP COLUMN receipt_filename', (err) => {
-                        if (err && !err.message.includes('no such column')) {
-                          console.error('Error dropping receipt_filename column:', err.message);
-                        } else if (!err) {
-                          console.log('✅ Dropped receipt_filename column from receipts table');
-                        }
-                      });
-                      
-                      // Create logos table
-                      db.run(createLogosTableSQL, (err) => {
+                      // Create transaction_items table
+                      db.run(createTransactionItemsTableSQL, (err) => {
                         if (err) {
-                          console.error('Error creating logos table:', err.message);
+                          console.error('Error creating transaction_items table:', err.message);
                         } else {
-                          console.log('✅ Logos table created or already exists');
+                          console.log('✅ Transaction items table created or already exists');
                           
-                          // Create transaction_items table
-                          db.run(createTransactionItemsTableSQL, (err) => {
+                          // Migration: Add lineNum and unitPrice columns to transaction_items table if they don't exist
+                          db.all("PRAGMA table_info(transaction_items)", (err, rows) => {
                             if (err) {
-                              console.error('Error creating transaction_items table:', err.message);
+                              console.error('Error checking transaction_items table structure:', err.message);
                             } else {
-                              console.log('✅ Transaction items table created or already exists');
+                              const hasLineNum = rows && rows.some(row => row.name === 'lineNum');
+                              const hasUnitPrice = rows && rows.some(row => row.name === 'unitPrice');
                               
-                              // Migration: Add lineNum and unitPrice columns to transaction_items table if they don't exist
-                              db.all("PRAGMA table_info(transaction_items)", (err, rows) => {
-                                if (err) {
-                                  console.error('Error checking transaction_items table structure:', err.message);
-                                } else {
-                                  const hasLineNum = rows && rows.some(row => row.name === 'lineNum');
-                                  const hasUnitPrice = rows && rows.some(row => row.name === 'unitPrice');
-                                  
-                                  if (!hasLineNum) {
-                                    console.log('🔄 Adding lineNum column to transaction_items table...');
-                                    db.run(addLineNumColumnSQL, (err) => {
-                                      if (err) {
-                                        console.error('Error adding lineNum column:', err.message);
-                                      } else {
-                                        console.log('✅ Added lineNum column to transaction_items table');
-                                      }
-                                    });
+                              if (!hasLineNum) {
+                                console.log('🔄 Adding lineNum column to transaction_items table...');
+                                db.run(addLineNumColumnSQL, (err) => {
+                                  if (err) {
+                                    console.error('Error adding lineNum column:', err.message);
                                   } else {
-                                    console.log('✅ lineNum column already exists in transaction_items table');
+                                    console.log('✅ Added lineNum column to transaction_items table');
                                   }
-                                  
-                                  if (!hasUnitPrice) {
-                                    console.log('🔄 Adding unitPrice column to transaction_items table...');
-                                    db.run(addUnitPriceColumnSQL, (err) => {
-                                      if (err) {
-                                        console.error('Error adding unitPrice column:', err.message);
-                                      } else {
-                                        console.log('✅ Added unitPrice column to transaction_items table');
-                                      }
-                                    });
-                                  } else {
-                                    console.log('✅ unitPrice column already exists in transaction_items table');
-                                  }
-                                }
-                              });
+                                });
+                              } else {
+                                console.log('✅ lineNum column already exists in transaction_items table');
+                              }
                               
-                              // Migration: Add organizationId column to transactions table if it doesn't exist
-                              db.all("PRAGMA table_info(transactions)", (err, rows) => {
+                              if (!hasUnitPrice) {
+                                console.log('🔄 Adding unitPrice column to transaction_items table...');
+                                db.run(addUnitPriceColumnSQL, (err) => {
+                                  if (err) {
+                                    console.error('Error adding unitPrice column:', err.message);
+                                  } else {
+                                    console.log('✅ Added unitPrice column to transaction_items table');
+                                  }
+                                });
+                              } else {
+                                console.log('✅ unitPrice column already exists in transaction_items table');
+                              }
+                            }
+                          });
+                          
+                          // Migration: Add organizationId column to transactions table if it doesn't exist
+                          db.all("PRAGMA table_info(transactions)", (err, rows) => {
                             if (err) {
                               console.error('Error checking transactions table structure:', err.message);
                             } else {
@@ -280,6 +290,22 @@ function initDatabase() {
                               }
                             }
                           });
+                          
+                          // Create feedback table
+                          db.run(createFeedbackTableSQL, (err) => {
+                            if (err) {
+                              console.error('Error creating feedback table:', err.message);
+                            } else {
+                              console.log('✅ Feedback table created or already exists');
+                            }
+                          });
+                          
+                          // Create options table
+                          db.run(createOptionsTableSQL, (err) => {
+                            if (err) {
+                              console.error('Error creating options table:', err.message);
+                            } else {
+                              console.log('✅ Options table created or already exists');
                             }
                           });
                         }
@@ -295,8 +321,6 @@ function initDatabase() {
     }
   });
 }
-
-
 
 // Get all transactions with donor information and item details
 function getAllTransactions() {
@@ -586,8 +610,8 @@ function getAllDonors() {
 function addDonor(donorData) {
   return new Promise((resolve, reject) => {
     const sql = `INSERT INTO donors (
-      qb_customer_id, name, email, phone, address, city, state, zip, country, company, notes
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+      qb_customer_id, name, email, phone, address, city, state, zip, country, company, notes, organizationId
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
     
     const params = [
       donorData.qb_customer_id,
@@ -600,7 +624,8 @@ function addDonor(donorData) {
       donorData.zip,
       donorData.country,
       donorData.company,
-      donorData.notes
+      donorData.notes,
+      donorData.organizationId
     ];
     
     db.run(sql, params, function(err) {
@@ -677,12 +702,12 @@ function getDonorById(id) {
   });
 }
 
-// Get donor by Quickbooks customer ID
-function getDonorByQbCustomerId(qbCustomerId) {
+// Get donor by Quickbooks customer ID and organization ID
+function getDonorByQbCustomerId(qbCustomerId, organizationId) {
   return new Promise((resolve, reject) => {
-    const sql = 'SELECT * FROM donors WHERE qb_customer_id = ?';
+    const sql = 'SELECT * FROM donors WHERE qb_customer_id = ? AND organizationId = ?';
     
-    db.get(sql, [qbCustomerId], (err, row) => {
+    db.get(sql, [qbCustomerId, organizationId], (err, row) => {
       if (err) {
         reject(err);
       } else {
@@ -692,12 +717,12 @@ function getDonorByQbCustomerId(qbCustomerId) {
   });
 }
 
-// Check if donor exists by Quickbooks customer ID
-function checkDonorExists(qbCustomerId) {
+// Check if donor exists by Quickbooks customer ID and organization ID
+function checkDonorExists(qbCustomerId, organizationId) {
   return new Promise((resolve, reject) => {
-    const sql = 'SELECT COUNT(*) as count FROM donors WHERE qb_customer_id = ?';
+    const sql = 'SELECT COUNT(*) as count FROM donors WHERE qb_customer_id = ? AND organizationId = ?';
     
-    db.get(sql, [qbCustomerId], (err, row) => {
+    db.get(sql, [qbCustomerId, organizationId], (err, row) => {
       if (err) {
         reject(err);
       } else {
@@ -708,15 +733,15 @@ function checkDonorExists(qbCustomerId) {
 }
 
 // Sync donor from Quickbooks customer data
-function syncDonorFromQuickbooks(qbCustomerData) {
+function syncDonorFromQuickbooks(qbCustomerData, organizationId) {
   return new Promise(async (resolve, reject) => {
     try {
       // Check if donor already exists
-      const exists = await checkDonorExists(qbCustomerData.Id);
+      const exists = await checkDonorExists(qbCustomerData.Id, organizationId);
       
       if (exists) {
-        console.log(`⏭️  Donor already exists for QB customer ID: ${qbCustomerData.Id}`);
-        const existingDonor = await getDonorByQbCustomerId(qbCustomerData.Id);
+        console.log(`⏭️  Donor already exists for QB customer ID: ${qbCustomerData.Id} in organization: ${organizationId}`);
+        const existingDonor = await getDonorByQbCustomerId(qbCustomerData.Id, organizationId);
         resolve({ ...existingDonor, action: 'skipped' });
         return;
       }
@@ -733,7 +758,8 @@ function syncDonorFromQuickbooks(qbCustomerData) {
         zip: qbCustomerData.BillAddr?.PostalCode || null,
         country: qbCustomerData.BillAddr?.Country || null,
         company: qbCustomerData.CompanyName || null,
-        notes: qbCustomerData.Notes || null
+        notes: qbCustomerData.Notes || null,
+        organizationId: organizationId
       };
       
       console.log(`📋 Mapping QB customer data to donor:`, {
@@ -799,7 +825,7 @@ function syncDonorsFromQuickbooks(qbCustomersData) {
 }
 
 // Process donor creation from transaction with customer ID
-async function processDonorFromTransaction(transactionData, quickbooksAPI) {
+async function processDonorFromTransaction(transactionData, quickbooksAPI, organizationId) {
   return new Promise(async (resolve, reject) => {
     try {
       if (!transactionData.name_id) {
@@ -811,12 +837,12 @@ async function processDonorFromTransaction(transactionData, quickbooksAPI) {
       const customerId = transactionData.name_id;
       const customerName = transactionData.name;
 
-      console.log(`🔄 Processing donor creation for transaction: ${customerName} (ID: ${customerId})`);
+      console.log(`🔄 Processing donor creation for transaction: ${customerName} (ID: ${customerId}) in organization: ${organizationId}`);
 
-      // Check if donor already exists by customer ID
-      const existingDonor = await getDonorByQbCustomerId(customerId);
+      // Check if donor already exists by customer ID and organization ID
+      const existingDonor = await getDonorByQbCustomerId(customerId, organizationId);
       if (existingDonor) {
-        console.log(`⏭️  Donor already exists for customer ID: ${customerId} (${customerName})`);
+        console.log(`⏭️  Donor already exists for customer ID: ${customerId} (${customerName}) in organization: ${organizationId}`);
         resolve({ action: 'skipped', reason: 'donor_exists', donor: existingDonor });
         return;
       }
@@ -826,7 +852,7 @@ async function processDonorFromTransaction(transactionData, quickbooksAPI) {
       const qbCustomer = await quickbooksAPI.getCustomerById(customerId);
 
       // Create donor from Quickbooks customer data
-      const syncResult = await syncDonorFromQuickbooks(qbCustomer);
+      const syncResult = await syncDonorFromQuickbooks(qbCustomer, organizationId);
       console.log(`✅ Donor creation result: ${syncResult.action}`);
 
       // If donor was created, update the transaction with the donor_id
@@ -1221,6 +1247,15 @@ function getOrganizationByQbId(qbOrganizationId) {
       if (err) {
         reject(err);
       } else {
+        // Decrypt EIN if present
+        if (row && row.ein) {
+          try {
+            row.ein = Encryption.decrypt(row.ein);
+          } catch (error) {
+            console.error('❌ Error decrypting EIN for organization', row.id, ':', error);
+            row.ein = null;
+          }
+        }
         resolve(row);
       }
     });
@@ -1936,6 +1971,183 @@ function updateTransactionAmountFromItems(transactionId) {
   });
 }
 
+// ===== FEEDBACK MANAGEMENT FUNCTIONS =====
+
+// Get all feedback
+function getAllFeedback() {
+  return new Promise((resolve, reject) => {
+    const sql = 'SELECT * FROM feedback ORDER BY created_at DESC';
+    
+    db.all(sql, [], (err, rows) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(rows);
+      }
+    });
+  });
+}
+
+// Get feedback by ID
+function getFeedbackById(id) {
+  return new Promise((resolve, reject) => {
+    const sql = 'SELECT * FROM feedback WHERE id = ?';
+    
+    db.get(sql, [id], (err, row) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+}
+
+// Get feedback by organization ID
+function getFeedbackByOrganizationId(organizationId) {
+  return new Promise((resolve, reject) => {
+    const sql = 'SELECT * FROM feedback WHERE organizationId = ? ORDER BY created_at DESC';
+    
+    db.all(sql, [organizationId], (err, rows) => {
+      if (err) {
+        reject(err);
+      } else {
+        resolve(rows);
+      }
+    });
+  });
+}
+
+// Add new feedback
+function addFeedback(feedbackData) {
+  return new Promise((resolve, reject) => {
+    const sql = 'INSERT INTO feedback (organizationId, feedback, email, rating) VALUES (?, ?, ?, ?)';
+    const params = [
+      feedbackData.organizationId || null,
+      feedbackData.feedback,
+      feedbackData.email || null,
+      feedbackData.rating
+    ];
+    
+    db.run(sql, params, function(err) {
+      if (err) {
+        console.error('❌ Error adding feedback:', err);
+        reject(err);
+      } else {
+        console.log(`✅ Feedback added with ID: ${this.lastID}`);
+        resolve({ id: this.lastID, ...feedbackData });
+      }
+    });
+  });
+}
+
+// Delete feedback
+function deleteFeedback(id) {
+  return new Promise((resolve, reject) => {
+    const sql = 'DELETE FROM feedback WHERE id = ?';
+    
+    db.run(sql, [id], function(err) {
+      if (err) {
+        reject(err);
+      } else {
+        if (this.changes > 0) {
+          resolve({ deleted: true, id });
+        } else {
+          resolve({ deleted: false, id });
+        }
+      }
+    });
+  });
+}
+
+// ===== OPTIONS FUNCTIONS =====
+
+// Get option by organizationId and key
+function getOption(organizationId, key) {
+  return new Promise((resolve, reject) => {
+    const sql = 'SELECT * FROM options WHERE organizationId = ? AND key = ?';
+    db.get(sql, [organizationId, key], (err, row) => {
+      if (err) {
+        console.error('❌ Error getting option:', err);
+        reject(err);
+      } else {
+        resolve(row);
+      }
+    });
+  });
+}
+
+// Get all options for an organization
+function getOptionsByOrganizationId(organizationId) {
+  return new Promise((resolve, reject) => {
+    const sql = 'SELECT * FROM options WHERE organizationId = ?';
+    db.all(sql, [organizationId], (err, rows) => {
+      if (err) {
+        console.error('❌ Error getting options:', err);
+        reject(err);
+      } else {
+        resolve(rows || []);
+      }
+    });
+  });
+}
+
+// Set option (insert or update)
+function setOption(organizationId, key, value) {
+  return new Promise((resolve, reject) => {
+    // First check if option exists
+    getOption(organizationId, key)
+      .then(existingOption => {
+        if (existingOption) {
+          // Update existing option
+          const sql = 'UPDATE options SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE organizationId = ? AND key = ?';
+          db.run(sql, [value, organizationId, key], function(err) {
+            if (err) {
+              console.error('❌ Error updating option:', err);
+              reject(err);
+            } else {
+              console.log(`✅ Updated option: ${key} = ${value} for organization ${organizationId}`);
+              resolve({ organizationId, key, value });
+            }
+          });
+        } else {
+          // Insert new option
+          const sql = 'INSERT INTO options (organizationId, key, value) VALUES (?, ?, ?)';
+          db.run(sql, [organizationId, key, value], function(err) {
+            if (err) {
+              console.error('❌ Error adding option:', err);
+              reject(err);
+            } else {
+              console.log(`✅ Added option: ${key} = ${value} for organization ${organizationId}`);
+              resolve({ id: this.lastID, organizationId, key, value });
+            }
+          });
+        }
+      })
+      .catch(err => reject(err));
+  });
+}
+
+// Delete option
+function deleteOption(organizationId, key) {
+  return new Promise((resolve, reject) => {
+    const sql = 'DELETE FROM options WHERE organizationId = ? AND key = ?';
+    
+    db.run(sql, [organizationId, key], function(err) {
+      if (err) {
+        reject(err);
+      } else {
+        if (this.changes > 0) {
+          console.log(`✅ Deleted option: ${key} for organization ${organizationId}`);
+          resolve({ deleted: true, organizationId, key });
+        } else {
+          resolve({ deleted: false, organizationId, key });
+        }
+      }
+    });
+  });
+}
+
 // Close database connection
 function closeDatabase() {
   db.close((err) => {
@@ -2003,5 +2215,14 @@ module.exports = {
   populateTransactionItemsFromQuickbooks,
   populateTransactionItemsFromMultipleQuickbooks,
   findTransactionByQbDocNum,
+  getAllFeedback,
+  getFeedbackById,
+  getFeedbackByOrganizationId,
+  addFeedback,
+  deleteFeedback,
+  getOption,
+  getOptionsByOrganizationId,
+  setOption,
+  deleteOption,
   closeDatabase
-}; 
+};

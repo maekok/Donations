@@ -283,7 +283,7 @@ class QuickbooksAPI {
     try {
       // Default parameters
       const defaults = {
-        start_date: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 30 days ago
+        start_date: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 30 days ago
         end_date: new Date().toISOString().split('T')[0], // today
         report_type: 'TransactionList',
         columns: 'tx_date,doc_num,name,subt_nat_amount,customer',

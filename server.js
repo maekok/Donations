@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express = require('express');
 const cookieParser = require('cookie-parser');
+const nodemailer = require('nodemailer');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const db = require('./database');
@@ -28,6 +29,28 @@ const upload = multer({
     }
   }
 });
+
+// Configure nodemailer transporter
+const emailTransporter = nodemailer.createTransport({
+  host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+  port: process.env.EMAIL_PORT || 587,
+  secure: false, // true for 465, false for other ports
+  auth: {
+    user: process.env.EMAIL_USER,
+    pass: process.env.EMAIL_PASS
+  }
+});
+
+// Verify transporter configuration on startup
+if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+  emailTransporter.verify((error, success) => {
+    if (error) {
+      console.log('⚠️  Email transporter verification failed:', error.message);
+    } else {
+      console.log('✅ Email transporter ready');
+    }
+  });
+}
 
 // Set EJS as template engine
 app.set('view engine', 'ejs');
@@ -93,6 +116,7 @@ app.get('/', async (req, res) => {
           id: row.id,
           date: row.date,
           donor_name: row.donor_name,
+          donor_email: row.donor_email,
           amount: row.transaction_total,
           qb_docnum: row.qb_docnum,
           hasReceipt: hasReceipt,
@@ -315,7 +339,18 @@ app.delete('/api/donors/:id', async (req, res) => {
 app.get('/api/donors/qb/:qbCustomerId', async (req, res) => {
   try {
     const { qbCustomerId } = req.params;
-    const donor = await db.getDonorByQbCustomerId(qbCustomerId);
+    const realmId = req.cookies.quickbooks_realmId;
+    
+    if (!realmId) {
+      return res.status(400).json({ error: 'No QuickBooks connection found' });
+    }
+    
+    const organization = await db.getOrganizationByQbId(realmId);
+    if (!organization) {
+      return res.status(404).json({ error: 'Organization not found' });
+    }
+    
+    const donor = await db.getDonorByQbCustomerId(qbCustomerId, organization.id);
     
     if (donor) {
       res.json(donor);
@@ -381,11 +416,17 @@ app.post('/api/donors/sync-from-transaction/:transactionId', async (req, res) =>
       return res.status(401).json({ error: 'Not authenticated with Quickbooks. Please connect first.' });
     }
     
-    console.log(`🔄 Syncing donor from transaction ${transactionId} with QB customer ID: ${qbCustomerId}`);
+    // Get organization ID from transaction
+    const organizationId = transaction.organizationId;
+    if (!organizationId) {
+      return res.status(400).json({ error: 'Transaction has no organization ID' });
+    }
+    
+    console.log(`🔄 Syncing donor from transaction ${transactionId} with QB customer ID: ${qbCustomerId} in organization: ${organizationId}`);
     console.log(`📋 Transaction details: name="${transaction.name}", extracted customer name="${customerName}", customer ID="${qbCustomerId}"`);
     
     // Check if donor already exists
-    const existingDonor = await db.getDonorByQbCustomerId(qbCustomerId);
+    const existingDonor = await db.getDonorByQbCustomerId(qbCustomerId, organizationId);
     if (existingDonor) {
       return res.json({
         message: 'Donor already exists',
@@ -399,7 +440,7 @@ app.post('/api/donors/sync-from-transaction/:transactionId', async (req, res) =>
     const qbCustomer = await quickbooks.getCustomerById(qbCustomerId);
     
     // Sync donor from Quickbooks customer data
-    const syncResult = await db.syncDonorFromQuickbooks(qbCustomer);
+    const syncResult = await db.syncDonorFromQuickbooks(qbCustomer, organizationId);
     
     res.json({
       message: 'Donor synced successfully from Quickbooks',
@@ -422,7 +463,7 @@ app.post('/api/donors/sync-all-from-transactions', async (req, res) => {
       return res.status(401).json({ error: 'Not authenticated with Quickbooks. Please connect first.' });
     }
     
-    // Get all transactions
+    // Get all transactions with donor information
     const transactions = await db.getAllTransactions();
     
     if (transactions.length === 0) {
@@ -444,47 +485,26 @@ app.post('/api/donors/sync-all-from-transactions', async (req, res) => {
     // Process each transaction
     for (const transaction of transactions) {
       try {
-        let qbCustomerId = null;
-        let customerName = null;
-        
-        try {
-          const nameData = JSON.parse(transaction.name);
-          qbCustomerId = nameData.id;
-          customerName = nameData.Value;
-        } catch (error) {
-          console.log(`⚠️  Transaction ${transaction.id} name field is not valid JSON, skipping`);
-          console.log(`   Transaction details: name="${transaction.name}"`);
+        // Skip transactions that already have a donor linked
+        if (transaction.donor_id) {
+          console.log(`⏭️  Transaction ${transaction.id} already has donor linked (ID: ${transaction.donor_id})`);
           results.skipped++;
           continue;
         }
         
-        if (!qbCustomerId) {
-          console.log(`⚠️  Transaction ${transaction.id} has no QB customer ID in name JSON, skipping`);
-          console.log(`   Transaction details: name="${transaction.name}", extracted customer name="${customerName}"`);
+        // Skip transactions without a donor name (these are likely not customer transactions)
+        if (!transaction.donor_name) {
+          console.log(`⚠️  Transaction ${transaction.id} has no donor name, skipping`);
           results.skipped++;
           continue;
         }
         
-        // Check if donor already exists
-        const existingDonor = await db.getDonorByQbCustomerId(qbCustomerId);
-        if (existingDonor) {
-          console.log(`⏭️  Donor already exists for QB customer ID: ${qbCustomerId} (${customerName})`);
-          results.skipped++;
-          continue;
-        }
-        
-        // Get customer data from Quickbooks using the customer ID
-        console.log(`🔍 Fetching customer data from Quickbooks for ID: ${qbCustomerId} (${customerName})`);
-        const qbCustomer = await quickbooks.getCustomerById(qbCustomerId);
-        
-        // Sync donor from Quickbooks customer data
-        const syncResult = await db.syncDonorFromQuickbooks(qbCustomer);
-        
-        if (syncResult.action === 'created') {
-          results.created++;
-        } else {
-          results.skipped++;
-        }
+        // For transactions without donor_id but with donor_name, we need to find or create the donor
+        // This would require additional logic to match donor names to QuickBooks customers
+        // For now, we'll skip these as they should be handled during the main transaction sync
+        console.log(`⚠️  Transaction ${transaction.id} has donor name but no donor_id - should be handled during main sync`);
+        results.skipped++;
+        continue;
         
       } catch (error) {
         console.error(`❌ Error processing transaction ${transaction.id}:`, error);
@@ -498,7 +518,7 @@ app.post('/api/donors/sync-all-from-transactions', async (req, res) => {
     console.log(`📊 Donor sync complete: ${results.created} created, ${results.skipped} skipped, ${results.errors.length} errors`);
     
     res.json({
-      message: 'Donor sync completed',
+      message: 'Donor sync completed - most donor creation happens during main transaction sync',
       results: results
     });
     
@@ -588,14 +608,22 @@ app.get('/auth/quickbooks/callback', async (req, res) => {
         <head>
           <title>QuickBooks Connected</title>
           <style>
+            * {
+              box-sizing: border-box;
+            }
+            html, body {
+              height: 100%;
+              margin: 0;
+              padding: 0;
+            }
             body {
               font-family: Arial, sans-serif;
               display: flex;
               justify-content: center;
               align-items: center;
-              height: 100vh;
-              margin: 0;
+              min-height: 100vh;
               background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+              position: relative;
             }
             .success-container {
               background: white;
@@ -875,7 +903,7 @@ app.get('/api/quickbooks/transactions', async (req, res) => {
 
     // Get query parameters from request with defaults
     const queryParams = {
-      start_date: req.query.start_date || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 7 days ago
+      start_date: req.query.start_date || new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 7 days ago
       end_date: req.query.end_date || new Date().toISOString().split('T')[0], // today
       report_type: req.query.report_type || 'TransactionList',
       transaction_type: req.query.transaction_type || 'SalesReceipt',
@@ -1093,37 +1121,55 @@ app.get('/api/quickbooks/transactions', async (req, res) => {
         console.log(`💾 Database results: ${dbResults.added} added, ${dbResults.skipped} skipped, ${dbResults.errors.length} errors`);
         
         // Process donor creation for transactions with customer IDs
-        console.log(`🔄 Processing donor creation for ${dbResults.savedTransactions.length} saved transactions`);
+        console.log(`🔄 Processing donor creation for ${validTransactions.length} valid transactions`);
         const donorProcessingResults = {
           created: 0,
           skipped: 0,
           errors: []
         };
         
-        for (const transaction of dbResults.savedTransactions) {
+        for (const originalTransaction of validTransactions) {
           try {
-            if (transaction.name_id) {
-              const donorResult = await db.processDonorFromTransaction(transaction, quickbooks);
+            if (originalTransaction.name_id) {
+              console.log(`🔍 Processing donor for transaction: ${originalTransaction.name} (ID: ${originalTransaction.name_id})`);
+              
+              // Find the corresponding saved transaction to get the database ID
+              const savedTransaction = dbResults.savedTransactions.find(st => st.qb_docnum === originalTransaction.doc_num);
+              
+              if (!savedTransaction) {
+                console.log(`⚠️ No saved transaction found for doc_num: ${originalTransaction.doc_num}`);
+                donorProcessingResults.skipped++;
+                continue;
+              }
+              
+              // Create transaction data with both original QB data and database ID
+              const transactionData = {
+                ...originalTransaction,
+                id: savedTransaction.id
+              };
+              
+              const donorResult = await db.processDonorFromTransaction(transactionData, quickbooks, organizationId);
               if (donorResult.action === 'created') {
                 // Link the newly created donor to the transaction
-                console.log(`🔗 Linking newly created donor ${donorResult.id} to transaction ${transaction.id}`);
-                await db.updateTransactionDonorId(transaction.id, donorResult.id);
+                console.log(`🔗 Linking newly created donor ${donorResult.id} to transaction ${savedTransaction.id}`);
+                await db.updateTransactionDonorId(savedTransaction.id, donorResult.id);
                 donorProcessingResults.created++;
               } else if (donorResult.action === 'skipped' && donorResult.donor && donorResult.donor.id) {
                 // If donor already exists, link the transaction to it
-                console.log(`🔗 Linking existing donor ${donorResult.donor.id} to transaction ${transaction.id}`);
-                await db.updateTransactionDonorId(transaction.id, donorResult.donor.id);
+                console.log(`🔗 Linking existing donor ${donorResult.donor.id} to transaction ${savedTransaction.id}`);
+                await db.updateTransactionDonorId(savedTransaction.id, donorResult.donor.id);
                 donorProcessingResults.skipped++;
               } else {
                 donorProcessingResults.skipped++;
               }
             } else {
+              console.log(`⚠️ Transaction ${originalTransaction.doc_num} has no customer ID, skipping donor creation`);
               donorProcessingResults.skipped++;
             }
           } catch (error) {
             console.error(`❌ Error processing donor for transaction:`, error);
             donorProcessingResults.errors.push({
-              transaction: transaction,
+              transaction: originalTransaction,
               error: error.message
             });
           }
@@ -1355,6 +1401,30 @@ app.get('/api/organizations', async (req, res) => {
   } catch (error) {
     console.error('❌ Error fetching organizations:', error);
     res.status(500).json({ error: 'Failed to fetch organizations' });
+  }
+});
+
+// Get current organization (based on realmId cookie)
+app.get('/api/organizations/current', async (req, res) => {
+  try {
+    const realmId = req.cookies.quickbooks_realmId;
+    console.log('🔍 Getting current organization for realmId:', realmId);
+    
+    if (!realmId) {
+      return res.status(400).json({ error: 'No QuickBooks connection found' });
+    }
+    
+    const organization = await db.getOrganizationByQbId(realmId);
+    
+    if (!organization) {
+      return res.status(404).json({ error: 'Organization not found for this QuickBooks connection' });
+    }
+    
+    console.log('✅ Found current organization:', organization.name, '(ID:', organization.id + ')');
+    res.json(organization);
+  } catch (error) {
+    console.error('❌ Error fetching current organization:', error);
+    res.status(500).json({ error: 'Failed to fetch current organization' });
   }
 });
 
@@ -2138,21 +2208,7 @@ app.post('/api/receipts/email', async (req, res) => {
       ]
     };
     
-    // Send actual email using Nodemailer
-    const nodemailer = require('nodemailer');
-    
-    // Create transporter
-    const transporter = nodemailer.createTransport({
-      host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-      port: process.env.EMAIL_PORT || 587,
-      secure: false, // true for 465, false for other ports
-      auth: {
-        user: process.env.EMAIL_USER,
-        pass: process.env.EMAIL_PASS
-      }
-    });
-    
-    // Send email
+    // Send email using the configured transporter
     const mailOptions = {
       from: process.env.EMAIL_USER,
       to: emailContent.to,
@@ -2161,7 +2217,7 @@ app.post('/api/receipts/email', async (req, res) => {
       attachments: emailContent.attachments
     };
     
-    await transporter.sendMail(mailOptions);
+    await emailTransporter.sendMail(mailOptions);
     console.log('📧 Email sent successfully to:', emailContent.to);
     
     // Update receipt as sent
@@ -2178,10 +2234,222 @@ app.post('/api/receipts/email', async (req, res) => {
   }
 });
 
+// ===== FEEDBACK API ENDPOINTS =====
+
+// Get all feedback
+app.get('/api/feedback', async (req, res) => {
+  try {
+    const feedback = await db.getAllFeedback();
+    res.json(feedback);
+  } catch (error) {
+    console.error('Error fetching feedback:', error);
+    res.status(500).json({ error: 'Failed to fetch feedback' });
+  }
+});
+
+// Get feedback by organization ID
+app.get('/api/feedback/organization/:organizationId', async (req, res) => {
+  try {
+    const { organizationId } = req.params;
+    const feedback = await db.getFeedbackByOrganizationId(organizationId);
+    res.json(feedback);
+  } catch (error) {
+    console.error('Error fetching feedback:', error);
+    res.status(500).json({ error: 'Failed to fetch feedback' });
+  }
+});
+
+// Submit new feedback
+app.post('/api/feedback', async (req, res) => {
+  try {
+    const { feedback, email, rating, organizationId } = req.body;
+    
+    // Validate required fields
+    if (!feedback || !rating) {
+      return res.status(400).json({ error: 'Feedback and rating are required' });
+    }
+    
+    // Validate rating is between 1 and 10
+    if (rating < 1 || rating > 10) {
+      return res.status(400).json({ error: 'Rating must be between 1 and 10' });
+    }
+    
+    const feedbackData = {
+      feedback,
+      email: email || null,
+      rating,
+      organizationId: organizationId || null
+    };
+    
+    const newFeedback = await db.addFeedback(feedbackData);
+    console.log(`✅ Feedback submitted: Rating ${rating}/10`);
+    
+    res.status(201).json({
+      message: 'Feedback submitted successfully',
+      feedback: newFeedback
+    });
+  } catch (error) {
+    console.error('Error submitting feedback:', error);
+    res.status(500).json({ error: 'Failed to submit feedback' });
+  }
+});
+
+// Delete feedback (admin only - you may want to add authentication)
+app.delete('/api/feedback/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const result = await db.deleteFeedback(id);
+    
+    if (result.deleted) {
+      res.json({ message: 'Feedback deleted successfully' });
+    } else {
+      res.status(404).json({ error: 'Feedback not found' });
+    }
+  } catch (error) {
+    console.error('Error deleting feedback:', error);
+    res.status(500).json({ error: 'Failed to delete feedback' });
+  }
+});
+
+// ===== OPTIONS API ROUTES =====
+
+// Get option by key
+app.get('/api/options/:key', async (req, res) => {
+  try {
+    const { key } = req.params;
+    const realmId = req.cookies.quickbooks_realmId;
+    
+    // List of options that don't require QuickBooks connection (browser-based)
+    const globalOptions = ['ShowOpeningScreen', 'showtermsofservice'];
+    
+    // Check if realmId is required for this option
+    const requiresQuickbooks = !globalOptions.includes(key);
+    
+    if (requiresQuickbooks && !realmId) {
+      return res.status(400).json({ error: 'No QuickBooks connection found' });
+    }
+    
+    // For global options without QuickBooks, use null organizationId
+    let organizationId = null;
+    if (realmId) {
+      const organization = await db.getOrganizationByQbId(realmId);
+      if (!organization) {
+        // For global options, allow proceeding without organization
+        if (requiresQuickbooks) {
+          return res.status(404).json({ error: 'Organization not found' });
+        }
+      } else {
+        organizationId = organization.id;
+      }
+    }
+    
+    const option = await db.getOption(organizationId, key);
+    
+    if (option) {
+      res.json(option);
+    } else {
+      res.status(404).json({ error: 'Option not found' });
+    }
+  } catch (error) {
+    console.error('Error fetching option:', error);
+    res.status(500).json({ error: 'Failed to fetch option' });
+  }
+});
+
+// Set/update option
+app.post('/api/options/:key', async (req, res) => {
+  try {
+    const { key } = req.params;
+    const { value } = req.body;
+    const realmId = req.cookies.quickbooks_realmId;
+    
+    // List of options that don't require QuickBooks connection (browser-based)
+    const globalOptions = ['ShowOpeningScreen', 'showtermsofservice'];
+    
+    // Check if realmId is required for this option
+    const requiresQuickbooks = !globalOptions.includes(key);
+    
+    if (requiresQuickbooks && !realmId) {
+      return res.status(400).json({ error: 'No QuickBooks connection found' });
+    }
+    
+    if (value === undefined) {
+      return res.status(400).json({ error: 'Value is required' });
+    }
+    
+    // For global options without QuickBooks, use null organizationId
+    let organizationId = null;
+    if (realmId) {
+      const organization = await db.getOrganizationByQbId(realmId);
+      if (!organization) {
+        // For global options, allow proceeding without organization
+        if (requiresQuickbooks) {
+          return res.status(404).json({ error: 'Organization not found' });
+        }
+      } else {
+        organizationId = organization.id;
+      }
+    }
+    
+    const result = await db.setOption(organizationId, key, value);
+    
+    res.json({
+      message: 'Option saved successfully',
+      option: result
+    });
+  } catch (error) {
+    console.error('Error saving option:', error);
+    res.status(500).json({ error: 'Failed to save option' });
+  }
+});
+
+// Delete option
+app.delete('/api/options/:key', async (req, res) => {
+  try {
+    const { key } = req.params;
+    const realmId = req.cookies.quickbooks_realmId;
+    
+    // List of options that don't require QuickBooks connection (browser-based)
+    const globalOptions = ['ShowOpeningScreen', 'showtermsofservice'];
+    
+    // Check if realmId is required for this option
+    const requiresQuickbooks = !globalOptions.includes(key);
+    
+    if (requiresQuickbooks && !realmId) {
+      return res.status(400).json({ error: 'No QuickBooks connection found' });
+    }
+    
+    // For global options without QuickBooks, use null organizationId
+    let organizationId = null;
+    if (realmId) {
+      const organization = await db.getOrganizationByQbId(realmId);
+      if (!organization) {
+        // For global options, allow proceeding without organization
+        if (requiresQuickbooks) {
+          return res.status(404).json({ error: 'Organization not found' });
+        }
+      } else {
+        organizationId = organization.id;
+      }
+    }
+    
+    const result = await db.deleteOption(organizationId, key);
+    
+    if (result.deleted) {
+      res.json({ message: 'Option deleted successfully' });
+    } else {
+      res.status(404).json({ error: 'Option not found' });
+    }
+  } catch (error) {
+    console.error('Error deleting option:', error);
+    res.status(500).json({ error: 'Failed to delete option' });
+  }
+});
+
 // Start the server
 const server = app.listen(PORT, () => {
-  console.log(`🚀 Server is running on http://localhost:${PORT}`);
-  console.log(`🗄️  Database: SQLite (data.db)`);
+  console.log(`🚀 Server is running http://localhost:${PORT}`);
+  console.log(`🗄️  Database: SQLite (data/data.db)`);
 });
 
 // Graceful shutdown

@@ -168,6 +168,10 @@ async function deleteLogo() {
       showMessage('Logo deleted successfully!', 'success');
       displayLogoPlaceholder();
       document.getElementById('logoFile').value = '';
+      
+      // Clear logo width and height values
+      document.getElementById('logoWidth').value = '';
+      document.getElementById('logoHeight').value = '';
     } else {
       showMessage(result.error || 'Failed to delete logo', 'error');
     }

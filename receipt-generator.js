@@ -540,8 +540,8 @@ class ReceiptGenerator {
     doc.text(`Amount: ${amountText}`)
        .moveDown(1); // new line
     
-    // Donated at: (donation date)
-    doc.text(`Donated at: ${this.formatDate(transaction.date)}`)
+    // Donated on: (donation date)
+    doc.text(`Donated on: ${this.formatDate(transaction.date)}`)
        .moveDown(1); // new line
     
     // Horizontal line
@@ -652,14 +652,9 @@ class ReceiptGenerator {
       if (organization) {
         orgName = organization.name;
         orgType = organization.type || 'Non-Profit';
-        // Decrypt EIN if it exists
+        // EIN is already decrypted by getOrganizationByQbId
         if (organization.ein) {
-          try {
-            ein = Encryption.decrypt(organization.ein);
-          } catch (error) {
-            console.error('❌ Error decrypting EIN for organization', organization.id, ':', error);
-            ein = 'N/A';
-          }
+          ein = organization.ein;
         } else {
           ein = 'N/A';
         }
@@ -671,17 +666,22 @@ class ReceiptGenerator {
         organization = organizations[0];
         orgName = organization.name;
         orgType = organization.type || 'Non-Profit';
-        // Decrypt EIN if it exists
+        // EIN is already decrypted by getAllOrganizations
         if (organization.ein) {
-          try {
-            ein = Encryption.decrypt(organization.ein);
-          } catch (error) {
-            console.error('❌ Error decrypting EIN for organization', organization.id, ':', error);
-            ein = 'N/A';
-          }
+          ein = organization.ein;
         } else {
           ein = 'N/A';
         }
+      }
+    }
+    
+    // Format EIN for display (XX-XXXXXXX)
+    let formattedEin = ein;
+    if (ein && ein !== 'N/A') {
+      // Remove any existing formatting
+      const digits = ein.replace(/\D/g, '');
+      if (digits.length === 9) {
+        formattedEin = `${digits.substring(0, 2)}-${digits.substring(2)}`;
       }
     }
     
@@ -693,10 +693,10 @@ class ReceiptGenerator {
     
     if (isNonProfit) {
       // Non-Profit: Show 501(c)(3) message
-      doc.text(`${orgName} is a registered 501(c)(3) non-profit organization with an EIN of ${ein}. No goods or services were provided in return for this contribution.`);
+      doc.text(`${orgName} is a registered 501(c)(3) non-profit organization with an EIN of ${formattedEin}. No goods or services were provided in return for this contribution.`);
     } else {
       // For-Profit: Show EIN and no goods/services message
-      doc.text(`${orgName}'s EIN is ${ein}. No goods or services were provided in return for this donation.`);
+      doc.text(`${orgName}'s EIN is ${formattedEin}. No goods or services were provided in return for this donation.`);
     }
   }
 

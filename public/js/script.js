@@ -117,6 +117,12 @@ document.addEventListener('click', function(event) {
 let currentOrganizationId = null;
 
 function openOrganizationDialog() {
+  // Check if user is logged into QuickBooks
+  if (!isLoggedInToQuickbooks) {
+    showNotification('Please connect to QuickBooks first to manage organization settings.', 'warning');
+    return;
+  }
+  
   // Close dropdown menu
   document.getElementById('dropdownMenu').classList.remove('show');
   
@@ -141,50 +147,47 @@ function closeOrganizationModal() {
 
 async function loadOrganizationData() {
   try {
-    console.log('🔍 Loading organization data...');
-    const response = await fetch('/api/organizations');
+    console.log('🔍 Loading current organization data...');
+    const response = await fetch('/api/organizations/current');
     console.log('📡 Response status:', response.status);
-    const organizations = await response.json();
-    console.log('📊 Organizations received:', organizations);
     
-    if (organizations.length > 0) {
-      // Use the first organization (or you could implement organization selection)
-      const org = organizations[0];
-      console.log('🏢 Using organization:', org);
-      currentOrganizationId = org.id;
-      
-      // Populate form fields
-      const form = document.getElementById('organizationForm');
-      if (!form) {
-        console.error('❌ Organization form not found!');
-        showNotification('Organization form not found', 'error');
-        return;
-      }
-      
-      document.getElementById('orgName').value = org.name || '';
-      document.getElementById('orgEin').value = formatEin(org.ein || '');
-      document.getElementById('orgAddress').value = org.address || '';
-      document.getElementById('orgCity').value = org.city || '';
-      document.getElementById('orgState').value = org.state || '';
-      document.getElementById('orgZip').value = org.zip || '';
-      document.getElementById('orgEmail').value = org.email || '';
-      document.getElementById('orgPhone').value = formatPhoneNumber(org.phone || '');
-      document.getElementById('orgContact').value = org.contact || '';
-      document.getElementById('orgType').value = org.type || '';
-      document.getElementById('orgUrl').value = org.url || '';
-      
-      // Setup formatting for inputs
-      setupPhoneFormatting();
-      setupEinFormatting();
-      
-      console.log('✅ Organization data loaded successfully');
-    } else {
-      // No organizations found - this is normal for a new installation
-      console.log('No organizations found - ready to create new organization');
-      currentOrganizationId = null;
-      // Clear form fields
-      document.getElementById('organizationForm').reset();
+    if (!response.ok) {
+      const error = await response.json();
+      console.error('❌ Error loading organization:', error);
+      showNotification(error.error || 'Failed to load organization data', 'error');
+      return;
     }
+    
+    const org = await response.json();
+    console.log('📊 Current organization received:', org);
+    console.log('🏢 Using organization:', org);
+    currentOrganizationId = org.id;
+    
+    // Populate form fields
+    const form = document.getElementById('organizationForm');
+    if (!form) {
+      console.error('❌ Organization form not found!');
+      showNotification('Organization form not found', 'error');
+      return;
+    }
+    
+    document.getElementById('orgName').value = org.name || '';
+    document.getElementById('orgEin').value = formatEin(org.ein || '');
+    document.getElementById('orgAddress').value = org.address || '';
+    document.getElementById('orgCity').value = org.city || '';
+    document.getElementById('orgState').value = org.state || '';
+    document.getElementById('orgZip').value = org.zip || '';
+    document.getElementById('orgEmail').value = org.email || '';
+    document.getElementById('orgPhone').value = formatPhoneNumber(org.phone || '');
+    document.getElementById('orgContact').value = org.contact || '';
+    document.getElementById('orgType').value = org.type || '';
+    document.getElementById('orgUrl').value = org.url || '';
+    
+    // Setup formatting for inputs
+    setupPhoneFormatting();
+    setupEinFormatting();
+    
+    console.log('✅ Organization data loaded successfully');
   } catch (error) {
     console.error('❌ Error loading organization data:', error);
     showNotification('Failed to load organization data. Please try again.', 'error');
@@ -289,6 +292,12 @@ window.onclick = function(event) {
 
 // Logo Modal Functions
 function openLogoDialog() {
+  // Check if user is logged into QuickBooks
+  if (!isLoggedInToQuickbooks) {
+    showNotification('Please connect to QuickBooks first to manage logo settings.', 'warning');
+    return;
+  }
+  
   // Close dropdown menu
   document.getElementById('dropdownMenu').classList.remove('show');
   
@@ -662,6 +671,10 @@ async function deleteLogo() {
       document.getElementById('deleteLogoBtn').style.display = 'none';
       document.getElementById('logoFile').value = '';
       
+      // Clear logo width and height values
+      document.getElementById('logoWidth').value = '';
+      document.getElementById('logoHeight').value = '';
+      
       showNotification('Logo deleted successfully!', 'success');
     } else {
       const error = await response.json();
@@ -676,10 +689,6 @@ async function deleteLogo() {
 
 // Logout from QuickBooks
 function logoutFromQuickbooks() {
-  if (!confirm('Are you sure you want to logout from QuickBooks?')) {
-    return;
-  }
-  
   showNotification('Logging out from QuickBooks...', 'info');
   
   fetch('/api/quickbooks/disconnect', {
@@ -890,13 +899,49 @@ async function syncWithQuickbooks() {
     const status = await statusResponse.json();
     
     if (!status.isAuthenticated) {
-      // Not connected, redirect to Quickbooks auth
+      // Not connected: check Terms of Service option before redirecting
       button.innerHTML = '<i class="fas fa-link"></i> Connect to Quickbooks';
       button.disabled = false;
-      
-      if (confirm('You need to connect to Quickbooks first. Would you like to connect now?')) {
-        window.location.href = '/auth/quickbooks';
+
+      // First check localStorage for ToS agreement
+      try {
+        const localTosAgreed = localStorage.getItem('tosAgreed');
+        if (localTosAgreed === 'true') {
+          // Already agreed in localStorage, proceed to connect
+          window.location.href = '/auth/quickbooks';
+          return;
+        }
+      } catch (e) {
+        // If localStorage check fails, continue to server check
       }
+
+      // If no localStorage agreement, check server-side option
+      try {
+        const tosResp = await fetch('/api/options/showtermsofservice');
+        if (!tosResp.ok) {
+          // No option set yet => show ToS modal
+          openTermsModal();
+          return;
+        }
+        const tos = await tosResp.json();
+        if (!tos || tos.value !== 'false') {
+          openTermsModal();
+          return;
+        }
+        // Server-side agreement found, also set localStorage for future
+        try {
+          localStorage.setItem('tosAgreed', 'true');
+        } catch (e) {
+          // Ignore localStorage errors
+        }
+      } catch (e) {
+        // On error, be safe and show ToS
+        openTermsModal();
+        return;
+      }
+
+      // ToS already agreed
+      window.location.href = '/auth/quickbooks';
       return;
     }
     
@@ -1038,17 +1083,16 @@ let currentEmailTransactionId = null;
 function openEmailDialog(transactionId) {
   currentEmailTransactionId = transactionId;
   
-  // Get donor email from the table row
-  const generateReceiptIcon = document.querySelector(`i[onclick*="generateReceipt('${transactionId}')"]`);
-  const row = generateReceiptIcon ? generateReceiptIcon.closest('tr') : null;
+  // Get donor email from the table row data attribute
+  const emailIcon = document.querySelector(`i[onclick*="openEmailDialog('${transactionId}')"]`);
+  const row = emailIcon ? emailIcon.closest('tr') : null;
   
-  if (row && row.cells.length > 3) {
-    // Now we need to get donor email from the donor table via API since email column was removed
-    // For now, we'll leave the email field empty and let the server-side code handle it
-    document.getElementById('emailAddress').value = '';
-    console.log('📧 Email field cleared - will be populated from donor data on server side');
+  if (row) {
+    const donorEmail = row.getAttribute('data-donor-email') || '';
+    document.getElementById('emailAddress').value = donorEmail;
+    console.log('📧 Email field populated with donor email:', donorEmail);
   } else {
-    console.warn('⚠️ Could not find email cell for transaction:', transactionId);
+    console.warn('⚠️ Could not find row for transaction:', transactionId);
     document.getElementById('emailAddress').value = '';
   }
   
@@ -1628,7 +1672,7 @@ function initializeColumnResizing() {
 }
 
 // Auto-sync with QuickBooks if redirected from successful connection
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
   // Check if we have the quickbooks_connected parameter in the URL
   const urlParams = new URLSearchParams(window.location.search);
   const quickbooksConnected = urlParams.get('quickbooks_connected');
@@ -1638,6 +1682,9 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Show a notification that we're syncing
     showNotification('QuickBooks connected! Syncing transactions...', 'info');
+    
+    // Flush any pending welcome preference now that we're logged in
+    await flushPendingWelcomePreference();
     
     // Automatically trigger the QuickBooks sync
     setTimeout(() => {
@@ -2117,33 +2164,91 @@ function closeWelcomeModal() {
   }
 }
 
-function updateWelcomePreference() {
+async function updateWelcomePreference() {
   const dontShowAgain = document.getElementById('dontShowAgain');
   if (dontShowAgain && dontShowAgain.checked) {
-    localStorage.setItem('hideWelcomeDialog', 'true');
-  } else {
-    localStorage.removeItem('hideWelcomeDialog');
+    try {
+      // Try to save to database via API
+      const response = await fetch('/api/options/ShowOpeningScreen', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ value: 'false' })
+      });
+      
+      if (response.ok) {
+        console.log('✅ Opening screen preference saved to database');
+      } else if (response.status === 400) {
+        // No QuickBooks connection yet, queue the write for later
+        console.log('⏳ No QuickBooks connection - queueing welcome preference for later');
+        sessionStorage.setItem('pendingWelcomePreference', 'false');
+      } else {
+        console.error('❌ Failed to save opening screen preference');
+      }
+    } catch (error) {
+      console.error('❌ Error saving opening screen preference:', error);
+    }
   }
 }
 
 // Check if we should show the welcome dialog on page load
-function checkWelcomeDialog() {
-  const hideWelcome = localStorage.getItem('hideWelcomeDialog');
+async function checkWelcomeDialog() {
+  // Check if welcome dialog has been shown in this session
+  const welcomeShown = sessionStorage.getItem('welcomeDialogShown');
   
-  // Show welcome dialog if:
-  // 1. User hasn't chosen to hide it
-  // 2. Not logged into QuickBooks (no realmId cookie)
-  if (!hideWelcome) {
-    // Check if there are any transactions - if none, show welcome
-    const tableBody = document.querySelector('table tbody');
-    if (tableBody) {
-      const rows = tableBody.querySelectorAll('tr');
-      // Show welcome if there are no transaction rows or only the "no transactions" message
-      if (rows.length === 0 || (rows.length === 1 && rows[0].cells.length === 1)) {
-        setTimeout(() => {
-          showWelcomeModal();
-        }, 500); // Small delay for better UX
+  // If already shown this session, don't show again
+  if (welcomeShown === 'true') {
+    console.log('ℹ️  Welcome dialog already shown this session - skipping');
+    return;
+  }
+  
+  // Don't show if user is already logged into QuickBooks
+  if (typeof isLoggedInToQuickbooks !== 'undefined' && isLoggedInToQuickbooks) {
+    console.log('ℹ️  Already logged into QuickBooks - skipping welcome dialog');
+    return;
+  }
+  
+  // Don't show if just connected to QuickBooks
+  const urlParams = new URLSearchParams(window.location.search);
+  const justConnected = urlParams.get('quickbooks_connected') === 'true';
+  
+  if (justConnected) {
+    console.log('✅ Just connected to QuickBooks - skipping welcome dialog');
+    return;
+  }
+  
+  // Show welcome dialog on first page load of this session (only when not logged in)
+  console.log('👋 First page load this session - showing welcome dialog');
+  setTimeout(() => {
+    showWelcomeModal();
+    // Mark that we've shown the welcome dialog this session
+    sessionStorage.setItem('welcomeDialogShown', 'true');
+  }, 500); // Small delay for better UX
+}
+
+// Flush pending welcome preference to database after QuickBooks login
+async function flushPendingWelcomePreference() {
+  const pendingPreference = sessionStorage.getItem('pendingWelcomePreference');
+  if (pendingPreference) {
+    console.log('🔄 Flushing pending welcome preference to database...');
+    try {
+      const response = await fetch('/api/options/ShowOpeningScreen', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ value: pendingPreference })
+      });
+      
+      if (response.ok) {
+        console.log('✅ Pending welcome preference saved to database');
+        sessionStorage.removeItem('pendingWelcomePreference');
+      } else {
+        console.error('❌ Failed to save pending welcome preference');
       }
+    } catch (error) {
+      console.error('❌ Error flushing pending welcome preference:', error);
     }
   }
 }
@@ -2172,3 +2277,250 @@ document.addEventListener('DOMContentLoaded', function() {
     }
   });
 });
+
+// ===== Terms of Service helpers =====
+function openTermsModal() {
+  const modal = document.getElementById('termsModal');
+  if (modal) {
+    modal.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+  }
+}
+
+function closeTermsModal() {
+  const modal = document.getElementById('termsModal');
+  if (modal) {
+    modal.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+}
+
+async function agreeToTermsAndConnect() {
+  // Store ToS agreement in localStorage so it won't show again
+  try {
+    localStorage.setItem('tosAgreed', 'true');
+  } catch (e) {
+    // Ignore localStorage errors (e.g., in private browsing mode)
+  }
+  
+  // Try to persist to server (may fail if not yet connected)
+  try {
+    await fetch('/api/options/showtermsofservice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: 'false' })
+    });
+  } catch (e) {
+    // Ignore errors here; still proceed to connect
+  }
+  
+  closeTermsModal();
+  window.location.href = '/auth/quickbooks';
+}
+
+// ===== Cookie Consent Banner Functions =====
+function showCookieBanner() {
+  const banner = document.getElementById('cookieBanner');
+  if (banner) {
+    banner.style.display = 'block';
+  }
+}
+
+function hideCookieBanner() {
+  const banner = document.getElementById('cookieBanner');
+  if (banner) {
+    banner.style.display = 'none';
+  }
+}
+
+async function acceptAllCookies() {
+  try {
+    localStorage.setItem('cookieConsent', 'accepted');
+    localStorage.setItem('tosAgreed', 'true');
+    console.log('✅ Cookie consent accepted');
+  } catch (e) {
+    console.error('❌ Error saving cookie consent:', e);
+  }
+
+  await persistTermsAcceptance();
+
+  hideCookieBanner();
+  showNotification('Cookie preferences saved', 'success');
+}
+
+function rejectAllCookies() {
+  try {
+    localStorage.setItem('cookieConsent', 'rejected');
+    localStorage.removeItem('tosAgreed');
+    console.log('✅ Cookie consent rejected');
+  } catch (e) {
+    console.error('❌ Error saving cookie consent:', e);
+  }
+  hideCookieBanner();
+  showNotification('Cookie preferences saved', 'success');
+}
+
+function checkCookieConsent() {
+  try {
+    const consent = localStorage.getItem('cookieConsent');
+    if (!consent) {
+      // No consent choice made yet, show the banner
+      showCookieBanner();
+    } else {
+      // User has already made a choice, hide the banner
+      hideCookieBanner();
+    }
+  } catch (e) {
+    // If localStorage is not available, show the banner anyway
+    console.warn('⚠️ localStorage not available, showing cookie banner');
+    showCookieBanner();
+  }
+}
+
+// Check cookie consent on page load
+document.addEventListener('DOMContentLoaded', function() {
+  checkCookieConsent();
+
+  document.querySelectorAll('[data-open-modal="terms"]').forEach(link => {
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      openTermsModal();
+    });
+  });
+
+  document.querySelectorAll('[data-open-modal="privacy"]').forEach(link => {
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      openPrivacyModal();
+    });
+  });
+});
+
+async function persistTermsAcceptance() {
+  try {
+    await fetch('/api/options/showtermsofservice', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: 'false' })
+    });
+  } catch (e) {
+    console.warn('⚠️ Unable to persist Terms acceptance to server:', e.message);
+  }
+}
+
+// Feedback Modal Functions
+function openFeedbackDialog() {
+  const feedbackModal = document.getElementById('feedbackModal');
+  if (feedbackModal) {
+    feedbackModal.style.display = 'block';
+    // Reset form
+    document.getElementById('feedbackForm').reset();
+    document.getElementById('ratingValue').textContent = '5';
+  }
+  // Close hamburger menu using the class toggle (same way it opens)
+  const dropdownMenu = document.getElementById('dropdownMenu');
+  if (dropdownMenu && dropdownMenu.classList.contains('show')) {
+    dropdownMenu.classList.remove('show');
+  }
+}
+
+function closeFeedbackModal() {
+  const feedbackModal = document.getElementById('feedbackModal');
+  if (feedbackModal) {
+    feedbackModal.style.display = 'none';
+  }
+}
+
+function updateRatingValue(value) {
+  const ratingValue = document.getElementById('ratingValue');
+  if (ratingValue) {
+    ratingValue.textContent = value;
+  }
+}
+
+async function submitFeedback() {
+  const feedbackText = document.getElementById('feedbackText').value.trim();
+  const feedbackEmail = document.getElementById('feedbackEmail').value.trim();
+  const rating = parseInt(document.getElementById('feedbackRating').value);
+  
+  // Validate feedback text
+  if (!feedbackText) {
+    showNotification('Please enter your feedback', 'error');
+    return;
+  }
+  
+  // Get organization ID if logged into QuickBooks
+  let organizationId = null;
+  // You can add logic here to get the current organization ID if needed
+  
+  const feedbackData = {
+    feedback: feedbackText,
+    email: feedbackEmail || null,
+    rating: rating,
+    organizationId: organizationId
+  };
+  
+  try {
+    const response = await fetch('/api/feedback', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(feedbackData)
+    });
+    
+    const data = await response.json();
+    
+    if (response.ok) {
+      closeFeedbackModal();
+    } else {
+      showNotification(data.error || 'Failed to submit feedback', 'error');
+    }
+  } catch (error) {
+    console.error('Error submitting feedback:', error);
+    showNotification('Failed to submit feedback', 'error');
+  }
+}
+
+// Close modals when clicking outside their content
+window.addEventListener('click', function(event) {
+  const feedbackModal = document.getElementById('feedbackModal');
+  if (feedbackModal && event.target === feedbackModal) {
+    closeFeedbackModal();
+  }
+
+  const termsModal = document.getElementById('termsModal');
+  if (termsModal && event.target === termsModal) {
+    closeTermsModal();
+  }
+
+  const privacyModal = document.getElementById('privacyModal');
+  if (privacyModal && event.target === privacyModal) {
+    closePrivacyModal();
+  }
+});
+
+// Expose modal helpers globally for inline handlers
+window.openTermsModal = openTermsModal;
+window.closeTermsModal = closeTermsModal;
+window.openPrivacyModal = openPrivacyModal;
+window.closePrivacyModal = closePrivacyModal;
+
+function openPrivacyModal() {
+  const modal = document.getElementById('privacyModal');
+  if (modal) {
+    modal.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+  }
+}
+
+function closePrivacyModal() {
+  const modal = document.getElementById('privacyModal');
+  if (modal) {
+    modal.style.display = 'none';
+    document.body.style.overflow = '';
+  }
+}
+
+window.openPrivacyModal = openPrivacyModal;
+window.closePrivacyModal = closePrivacyModal;

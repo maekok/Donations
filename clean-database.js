@@ -3,7 +3,7 @@ const path = require('path');
 const readline = require('readline');
 
 // Database file path
-const dbPath = path.join(__dirname, 'data.db');
+const dbPath = path.join(__dirname, 'data', 'data.db');
 
 // Create readline interface for user confirmation
 const rl = readline.createInterface({
@@ -30,8 +30,7 @@ function cleanDatabase() {
         'transactions',
         'logos',
         'donors',
-        'organizations',
-        'users'
+        'organizations'
       ];
       
       let completedTables = 0;
@@ -120,7 +119,6 @@ console.log('   - transactions');
 console.log('   - logos');
 console.log('   - donors');
 console.log('   - organizations');
-console.log('   - users');
 console.log('');
 
 rl.question('Are you sure you want to continue? (yes/no): ', (answer) => {

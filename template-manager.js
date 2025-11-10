@@ -155,6 +155,8 @@ class TemplateManager {
       if (logoPath && fs.existsSync(logoPath)) {
         fs.unlinkSync(logoPath);
         this.config.receipt.logo.enabled = false;
+        this.config.receipt.logo.width = null;
+        this.config.receipt.logo.height = null;
         this.saveConfig();
         console.log('✅ Logo deleted');
         return { success: true };

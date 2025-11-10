@@ -16,13 +16,28 @@
             <i class="fas fa-bars"></i>
           </button>
           <div class="dropdown-menu" id="dropdownMenu">
-            <a href="#" onclick="openOrganizationDialog()">
-              <i class="fas fa-building"></i>
-              Organization Settings
-            </a>
-            <a href="#" onclick="openLogoDialog()">
-              <i class="fas fa-image"></i>
-              Logo
+            <% if (isLoggedInToQuickbooks) { %>
+              <a href="#" onclick="openOrganizationDialog()">
+                <i class="fas fa-building"></i>
+                Organization
+              </a>
+              <a href="#" onclick="openLogoDialog()">
+                <i class="fas fa-image"></i>
+                Logo
+              </a>
+            <% } else { %>
+              <a href="#" class="disabled" title="Please connect to QuickBooks first" onclick="openOrganizationDialog()">
+                <i class="fas fa-building"></i>
+                Organization
+              </a>
+              <a href="#" class="disabled" title="Please connect to QuickBooks first" onclick="openLogoDialog()">
+                <i class="fas fa-image"></i>
+                Logo
+              </a>
+            <% } %>
+            <a href="#" onclick="openFeedbackDialog()">
+              <i class="fas fa-comment-dots"></i>
+              Feedback
             </a>
           </div>
         </div>
@@ -71,7 +86,7 @@
       </thead>
       <tbody>
         <% data.forEach(function(row) { %>
-          <tr>
+          <tr data-donor-email="<%= row.donor_email || '' %>">
             <td>
               <% if (row.date) { %>
                 <% 
@@ -111,7 +126,7 @@
               <i class="fa-solid fa-receipt icon" 
                  title="Generate Receipt" 
                  onclick="generateReceipt('<%= row.id %>')"
-                 style="<%= row.hasReceipt ? 'margin-left: 10px;' : '' %>"></i>
+                 <% if (row.hasReceipt) { %>style="margin-left: 10px;"<% } %>></i>
               <% if (row.hasReceipt) { %>
                 <i class="fas fa-envelope icon" 
                    title="Email Receipt" 
@@ -299,7 +314,7 @@
               <div class="step-number">1</div>
               <div class="step-content">
                 <h4><i class="fas fa-cloud-download-alt"></i> Import from QuickBooks</h4>
-                <p>Connect to QuickBooks and sync your donation transactions</p>
+                <p>We import transactions from QuickBooks Sales Receipts. If you track your donations using another method, please leave us feedback and we can add that.</p>
               </div>
             </div>
             
@@ -334,6 +349,145 @@
     </div>
   </div>
 
+  <!-- Terms of Service Modal -->
+  <div id="termsModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Terms of Service</h2>
+        <span class="close" onclick="closeTermsModal()">&times;</span>
+      </div>
+      <div class="modal-body" style="max-height: 60vh; overflow-y: auto;">
+        <div class="terms-content">
+          <h3>Reznim Donation Receipt App &ndash; Terms of Service</h3>
+
+          <p class="terms-note"><em>To continue using the app, close this dialog after review and choose "Accept All" on the cookie banner below.</em></p>
+
+          <h4>1. Overview</h4>
+          <p>Welcome to Donation Receipt App (&ldquo;the App,&rdquo; &ldquo;we,&rdquo; &ldquo;us,&rdquo; or &ldquo;our&rdquo;). Donation Receipt App allows businesses to connect their QuickBooks Online accounts to generate donation receipts, including donor and sales receipt information. By accessing or using the App, you agree to these Terms of Service (&ldquo;Terms&rdquo;). If you do not agree, please do not use the App.</p>
+
+          <h4>2. Eligibility and Business Use</h4>
+          <p>Donation Generator is intended for business use only. By using the App, you represent that you are authorized to act on behalf of your organization and to bind it to these Terms.</p>
+
+          <h4>3. Connection to QuickBooks</h4>
+          <p>You connect to QuickBooks Online through Intuit&rsquo;s OAuth 2.0 authentication. We do not store your QuickBooks username, password, or access credentials. By connecting your QuickBooks account, you grant us permission to access specific data authorized by you through Intuit&rsquo;s API. Your use of QuickBooks Online is also governed by Intuit&rsquo;s Terms of Service and Privacy Policy.</p>
+
+          <h4>4. Data We Collect and Store</h4>
+          <p>Donation Generator may store limited business data retrieved from QuickBooks, including sales receipts, donor information, and company information (including Tax ID, which is encrypted at rest). We do not access or store any unrelated QuickBooks data unless explicitly authorized by you during OAuth connection.</p>
+
+          <h4>5. Data Security</h4>
+          <p>Tax ID and other sensitive information are encrypted using industry-standard encryption methods. We use reasonable technical and organizational measures to protect stored data. However, no method of transmission or storage is 100% secure, and we cannot guarantee absolute security.</p>
+
+          <h4>6. Data Ownership and Usage</h4>
+          <p>All data imported from your QuickBooks account remains your property. We use the data solely to provide the functionality of the App and do not sell, share, or monetize it. You may disconnect your QuickBooks account at any time, which will revoke our access to your data.</p>
+
+          <h4>7. Free Service</h4>
+          <p>Donation Generator is provided free of charge. We may introduce optional paid features or enhancements in the future, in which case updated terms will apply.</p>
+
+          <h4>8. Service Availability and Modifications</h4>
+          <p>We may update, modify, or discontinue the App or any part of it at any time without prior notice. We do not guarantee uninterrupted or error-free operation.</p>
+
+          <h4>9. Disclaimers</h4>
+          <p>The App is provided &ldquo;as is&rdquo; and &ldquo;as available.&rdquo; We make no warranties, express or implied, about the App&rsquo;s accuracy, reliability, or suitability for any particular purpose. You assume full responsibility for your use of the App and any resulting data.</p>
+
+          <h4>10. Limitation of Liability</h4>
+          <p>To the maximum extent permitted by law, we are not liable for any indirect, incidental, special, or consequential damages arising from your use of the App. Our total liability under these Terms will not exceed $100.</p>
+
+          <h4>11. Termination</h4>
+          <p>You may stop using the App at any time. We may suspend or terminate your access at our discretion if you violate these Terms or if we discontinue the service.</p>
+
+          <h4>12. Compliance with Laws and Intuit Policies</h4>
+          <p>You agree to use Donation Generator in compliance with all applicable laws and Intuit Developer Policies, including restrictions on storing or handling QuickBooks data.</p>
+
+          <h4>13. Governing Law</h4>
+          <p>These Terms are governed by and construed in accordance with the laws of the United States and the state of [Insert State], without regard to conflict of laws principles.</p>
+
+          <h4>14. Changes to These Terms</h4>
+          <p>We may update these Terms from time to time. The updated version will be posted with a new effective date. Your continued use of the App after updates constitutes acceptance of the new Terms.</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeTermsModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Privacy Policy Modal -->
+  <div id="privacyModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Privacy Policy</h2>
+        <span class="close" onclick="closePrivacyModal()">&times;</span>
+      </div>
+      <div class="modal-body" style="max-height: 60vh; overflow-y: auto;">
+        <div class="terms-content">
+          <h3>Reznim Donation Receipt App &ndash; Privacy Policy</h3>
+
+          <p>This Privacy Policy explains how we collect, use, and safeguard the business information retrieved from your QuickBooks Online account while using the Donation Receipt App (&ldquo;the App&rdquo;).</p>
+
+          <h4>Information We Collect</h4>
+          <p>When you authorize the App through Intuit&rsquo;s OAuth 2.0 connection, we may retrieve sales receipts, donor information, and organization details (including Tax ID). We do not access any other QuickBooks data unless you specifically authorize it.</p>
+
+          <h4>How We Use Information</h4>
+          <p>We use the imported data solely to provide donation receipt functionality within the App. We do not sell, share, or monetize the data.</p>
+
+          <h4>Data Storage & Security</h4>
+          <p>Tax IDs and other sensitive fields are encrypted using industry-standard methods. While we take reasonable steps to protect information, no system can guarantee absolute security.</p>
+
+          <h4>Your Choices</h4>
+          <p>You can disconnect your QuickBooks account at any time to revoke our access. Please email support@reznim.com if you would like your locally stored data purged.</p>
+
+          <h4>Changes</h4>
+          <p>We may update this Privacy Policy periodically. Continued use of the App after changes constitutes acceptance of the updated policy.</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closePrivacyModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Feedback Modal -->
+  <div id="feedbackModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2><i class="fas fa-comment-dots"></i> Feedback</h2>
+        <span class="close" onclick="closeFeedbackModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <form id="feedbackForm">
+          <div class="form-group">
+            <label for="feedbackEmail">Email (optional)</label>
+            <input type="email" id="feedbackEmail" name="email" placeholder="your@email.com">
+          </div>
+          
+          <div class="form-group">
+            <label for="feedbackText">Your Feedback *</label>
+            <textarea id="feedbackText" name="feedback" rows="6" required placeholder="Share your thoughts, suggestions, or report any issues..."></textarea>
+          </div>
+          
+          <div class="form-group">
+            <label for="feedbackRating">How would you rate your experience? *</label>
+            <div class="rating-container">
+              <input type="range" id="feedbackRating" name="rating" min="1" max="10" value="5" oninput="updateRatingValue(this.value)">
+              <div class="rating-display">
+                <span id="ratingValue">5</span>
+                <span class="rating-label">/ 10</span>
+              </div>
+            </div>
+            <div class="rating-labels">
+              <span>Poor</span>
+              <span>Excellent</span>
+            </div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeFeedbackModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitFeedback()">Submit Feedback</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Email Receipt Modal -->
   <div id="emailModal" class="modal">
     <div class="modal-content">
@@ -344,7 +498,7 @@
       <div class="modal-body">
         <div class="form-group">
           <label for="emailAddress">Email Address:</label>
-          <input type="email" id="emailAddress" readonly>
+          <input type="email" id="emailAddress">
         </div>
         <div class="form-group">
           <label for="emailSubject">Subject:</label>
@@ -380,6 +534,36 @@
     </div>
   </div>
 
+  <footer class="page-footer">
+    <p>
+      &copy; 2025 Reznim, LLC
+      <span class="footer-separator">|</span>
+      <a href="#" data-open-modal="terms">Terms of Service</a>
+      <span class="footer-separator">|</span>
+      <a href="#" data-open-modal="privacy">Privacy Policy</a>
+    </p>
+  </footer>
+
+  <!-- Cookie Consent Banner -->
+  <div id="cookieBanner" class="cookie-banner" style="display: none;">
+    <div class="cookie-banner-content">
+      <p class="cookie-banner-text">
+        We use cookies to enhance your user experience. By using our website and services, you consent to our 
+        <a href="#" data-open-modal="terms" style="color: #007bff; text-decoration: underline;">Terms of Service</a> 
+        and <a href="#" data-open-modal="privacy" style="color: #007bff; text-decoration: underline;">Privacy Policy</a>.
+      </p>
+      <div class="cookie-banner-buttons">
+        <button class="btn btn-secondary" onclick="rejectAllCookies()">Reject All</button>
+        <button class="btn btn-primary" onclick="acceptAllCookies()">Accept All</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="app-data" data-logged-in="<%- isLoggedInToQuickbooks ? 'true' : 'false' %>" style="display: none;"></div>
+  <script>
+    // Make server-side variables available to JavaScript
+    var isLoggedInToQuickbooks = document.getElementById('app-data').getAttribute('data-logged-in') === 'true';
+  </script>
   <script src="/js/script.js"></script>
 </body>
 </html> 
