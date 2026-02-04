@@ -1,18 +1,21 @@
 const axios = require('axios');
 const crypto = require('crypto');
+const db = require('./database');
 
 class QuickbooksAPI {
   constructor() {
-    // Configuration - you'll add these values later
-    this.clientId = process.env.QUICKBOOKS_CLIENT_ID || 'AB49HusgskKkwaaShObSYMj8Xm13YfDAonES4BUbFnY4TNQhV5';
-    this.clientSecret = process.env.QUICKBOOKS_CLIENT_SECRET || 'pL9VvzSYOyCZ1wXoWQZWsuKSh1oKmhUPZOL53Jq7';
+    // Configuration - credentials loaded from database
+    this.clientId = null;
+    this.clientSecret = null;
+    this.credentialsLoaded = false;
+    this.credentialsLoading = false;
     this.redirectUri = process.env.QUICKBOOKS_REDIRECT_URI || 'http://localhost:3000/auth/quickbooks/callback';
     this.environment = process.env.QUICKBOOKS_ENVIRONMENT || 'sandbox'; // 'sandbox' or 'production'
     
     // API endpoints based on environment
     this.baseURL = this.environment === 'production' 
       ? 'https://quickbooks.api.intuit.com'
-      : 'https://sandbox-accounts.platform.intuit.com';
+      : 'https://sandbox=accounts.platform.intuit.com';
     
     this.apiURL = this.environment === 'production'
       ? 'https://quickbooks.api.intuit.com/v3/company'
@@ -34,8 +37,80 @@ class QuickbooksAPI {
     this.tokenExpiry = null;
   }
 
+  // Load credentials - environment variables first, then database fallback
+  async loadCredentials() {
+    // If already loaded, return immediately
+    if (this.credentialsLoaded) {
+      return;
+    }
+
+    // If currently loading, wait for it
+    if (this.credentialsLoading) {
+      // Wait for credentials to be loaded (simple polling approach)
+      let attempts = 0;
+      while (this.credentialsLoading && attempts < 50) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        attempts++;
+      }
+      if (this.credentialsLoaded) {
+        return;
+      }
+    }
+
+    // Start loading
+    this.credentialsLoading = true;
+
+    try {
+      const envSuffix = this.environment === 'production' ? 'PRODUCTION' : 'SANDBOX';
+      
+      // Priority 1: Check environment variables (with environment-specific suffix)
+      const envClientIdKey = `QUICKBOOKS_CLIENT_ID_${envSuffix}`;
+      const envClientSecretKey = `QUICKBOOKS_CLIENT_SECRET_${envSuffix}`;
+      
+      // Also check generic environment variables (without suffix)
+      this.clientId = process.env[envClientIdKey] || process.env.QUICKBOOKS_CLIENT_ID || null;
+      this.clientSecret = process.env[envClientSecretKey] || process.env.QUICKBOOKS_CLIENT_SECRET || null;
+
+      // Priority 2: Fall back to database if not in environment variables
+      if (!this.clientId || !this.clientSecret) {
+        const clientIdKey = `QUICKBOOKS_CLIENT_ID_${envSuffix}`;
+        const clientSecretKey = `QUICKBOOKS_CLIENT_SECRET_${envSuffix}`;
+
+        // Try to get from database (global options, organizationId = null)
+        const [clientIdOption, clientSecretOption] = await Promise.all([
+          db.getOption(null, clientIdKey).catch(() => null),
+          db.getOption(null, clientSecretKey).catch(() => null)
+        ]);
+
+        this.clientId = this.clientId || clientIdOption?.value || null;
+        this.clientSecret = this.clientSecret || clientSecretOption?.value || null;
+      }
+
+      if (!this.clientId || !this.clientSecret) {
+        throw new Error(`QuickBooks credentials not found. Please set environment variables (${envClientIdKey} and ${envClientSecretKey}) or database options (${clientIdKey} and ${clientSecretKey}).`);
+      }
+
+      this.credentialsLoaded = true;
+      const source = process.env[envClientIdKey] || process.env.QUICKBOOKS_CLIENT_ID ? 'environment variables' : 'database';
+      console.log(`✅ QuickBooks credentials loaded for ${this.environment} environment from ${source}`);
+    } catch (error) {
+      console.error('❌ Error loading QuickBooks credentials:', error.message);
+      throw error;
+    } finally {
+      this.credentialsLoading = false;
+    }
+  }
+
+  // Ensure credentials are loaded before making API calls
+  async ensureCredentials() {
+    if (!this.credentialsLoaded) {
+      await this.loadCredentials();
+    }
+  }
+
   // Generate OAuth2 authorization URL
-  generateAuthURL() {
+  async generateAuthURL() {
+    await this.ensureCredentials();
     const state = crypto.randomBytes(32).toString('hex');
     const scope = 'com.intuit.quickbooks.accounting';
     
@@ -55,6 +130,7 @@ class QuickbooksAPI {
 
   // Exchange authorization code for access token
   async exchangeCodeForToken(code, realmId) {
+    await this.ensureCredentials();
     try {
       const response = await axios.post(this.tokenURL, {
         grant_type: 'authorization_code',
@@ -91,6 +167,7 @@ class QuickbooksAPI {
 
   // Refresh access token
   async refreshAccessToken() {
+    await this.ensureCredentials();
     if (!this.refreshToken) {
       throw new Error('No refresh token available');
     }
@@ -281,9 +358,14 @@ class QuickbooksAPI {
   // Get transaction report with custom query parameters
   async getTransactionReport(queryParams = {}) {
     try {
+      // Calculate start of previous calendar year (last two calendar years)
+      const currentYear = new Date().getFullYear();
+      const previousYear = currentYear - 1;
+      const startOfPreviousYear = new Date(previousYear, 0, 1).toISOString().split('T')[0]; // January 1 of previous year
+      
       // Default parameters
       const defaults = {
-        start_date: new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 30 days ago
+        start_date: startOfPreviousYear, // Start of previous calendar year (last two calendar years)
         end_date: new Date().toISOString().split('T')[0], // today
         report_type: 'TransactionList',
         columns: 'tx_date,doc_num,name,subt_nat_amount,customer',
@@ -473,6 +555,7 @@ class QuickbooksAPI {
 
   // Revoke access token with QuickBooks
   async revokeToken() {
+    await this.ensureCredentials();
     if (!this.accessToken) {
       throw new Error('No access token to revoke');
     }

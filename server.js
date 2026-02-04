@@ -2,13 +2,24 @@ require('dotenv').config();
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const nodemailer = require('nodemailer');
+const csrf = require('csurf');
+const helmet = require('helmet');
+const { body, query, param, validationResult } = require('express-validator');
+const crypto = require('crypto');
+const Encryption = require('./encryption');
 const app = express();
 const PORT = process.env.PORT || 3000;
+const IS_PRODUCTION = process.env.NODE_ENV === 'production';
+
+// Trust proxy for accurate IP detection (important for Fly.io and other proxies)
+app.set('trust proxy', true);
 const db = require('./database');
 const quickbooks = require('./quickbooks');
 const ReceiptGenerator = require('./receipt-generator');
 const TemplateManager = require('./template-manager');
 const multer = require('multer');
+const fs = require('fs');
+const path = require('path');
 
 // Initialize receipt generator and template manager
 const receiptGenerator = new ReceiptGenerator();
@@ -30,42 +41,1105 @@ const upload = multer({
   }
 });
 
-// Configure nodemailer transporter
-const emailTransporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST || 'smtp.gmail.com',
-  port: process.env.EMAIL_PORT || 587,
-  secure: false, // true for 465, false for other ports
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS
-  }
-});
+// Global email transporter (will be initialized and updated as needed)
+let emailTransporter = null;
 
-// Verify transporter configuration on startup
-if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-  emailTransporter.verify((error, success) => {
-    if (error) {
-      console.log('⚠️  Email transporter verification failed:', error.message);
-    } else {
-      console.log('✅ Email transporter ready');
-    }
-  });
+// Utility: mask secrets (show only last 2 chars)
+function maskSecret(secret) {
+  if (!secret) return '(none)';
+  const s = String(secret);
+  if (s.length <= 2) return '*'.repeat(s.length);
+  return '*'.repeat(s.length - 2) + s.slice(-2);
 }
+
+function logEmailConfig(source, cfg) {
+  try {
+    const passInfo = cfg && cfg.pass ? `${maskSecret(cfg.pass)} (len=${String(cfg.pass).length})` : '(none)';
+    console.log('📧 Email config:', {
+      source,
+      host: cfg && cfg.host,
+      port: cfg && cfg.port,
+      secure: !!(cfg && cfg.secure),
+      user: cfg && cfg.user,
+      password: passInfo
+    });
+  } catch (e) {
+    // Never let logging break the app
+  }
+}
+
+// Initialize email transporter on startup (from environment variables)
+function initializeEmailTransporter() {
+  if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
+    const cfg = {
+      host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+      port: parseInt(process.env.EMAIL_PORT) || 587,
+      secure: process.env.EMAIL_SECURE === 'true' || false,
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS
+    };
+
+    // Log masked config
+    logEmailConfig('ENV(startup)', cfg);
+
+    emailTransporter = nodemailer.createTransport({
+      host: cfg.host,
+      port: cfg.port,
+      secure: cfg.secure,
+      auth: {
+        user: cfg.user,
+        pass: cfg.pass
+      }
+    });
+
+    // Verify transporter configuration on startup
+    emailTransporter.verify((error, success) => {
+      if (error) {
+        console.log('⚠️  Email transporter verification failed:', error.message);
+      } else {
+        console.log('✅ Email transporter ready');
+      }
+    });
+  } else {
+    console.log('ℹ️  Email transporter not initialized (no EMAIL_USER/EMAIL_PASS in environment)');
+  }
+}
+
+// Initialize on startup
+initializeEmailTransporter();
+
+// Secure database file permissions on startup
+(function hardenDatabasePermissions(){
+  try {
+    const dataDir = path.join(__dirname, 'data');
+    const dbFile = path.join(dataDir, 'data.db');
+    const walFile = path.join(dataDir, 'data.db-wal');
+    const shmFile = path.join(dataDir, 'data.db-shm');
+
+    // Ensure data directory exists and set to 700
+    try {
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+        console.log('🔐 Created data directory with 700 permissions');
+      }
+      // Attempt to enforce 700 on existing dir
+      fs.chmodSync(dataDir, 0o700);
+    } catch (e) {
+      console.warn('⚠️  Could not set permissions on data directory:', e.message);
+    }
+
+    // Helper to chmod file if exists
+    const protectFile = (p) => {
+      try {
+        if (fs.existsSync(p)) {
+          fs.chmodSync(p, 0o600);
+          console.log(`🔐 Set 600 permissions on ${path.basename(p)}`);
+        }
+      } catch (e) {
+        console.warn(`⚠️  Could not set 600 permissions on ${path.basename(p)}:`, e.message);
+      }
+    };
+
+    protectFile(dbFile);
+    protectFile(walFile);
+    protectFile(shmFile);
+  } catch (err) {
+    console.warn('⚠️  Database permission hardening skipped:', err.message);
+  }
+})();
 
 // Set EJS as template engine
 app.set('view engine', 'ejs');
 app.set('views', './views');
 
+// XSS Protection: Add security headers with Helmet
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
+      scriptSrcAttr: ["'unsafe-inline'"], // Allow inline event handlers (onclick, etc.)
+      styleSrc: ["'self'", "'unsafe-inline'", "https://cdnjs.cloudflare.com"],
+      imgSrc: ["'self'", "data:", "https:", "blob:"],
+      fontSrc: ["'self'", "https://cdnjs.cloudflare.com"],
+      connectSrc: ["'self'"],
+      frameSrc: ["'self'"]
+    }
+  },
+  crossOriginEmbedderPolicy: false, // Allow PDF iframes
+  xssFilter: true, // Enable XSS filter
+  noSniff: true, // Prevent MIME type sniffing
+  frameguard: { action: 'sameorigin' } // Allow same-origin frames (for PDF viewer)
+}));
+
+// SQL Injection Protection: Detect and block SQL injection attempts
+function detectSQLInjection(input) {
+  if (typeof input !== 'string') {
+    return false;
+  }
+  
+  // Common SQL injection patterns
+  const sqlInjectionPatterns = [
+    /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE|UNION|SCRIPT)\b)/i,
+    /('|(\\')|(;)|(--)|(\/\*)|(\*\/)|(\+)|(\%27)|(\%22))/i,
+    /(\bOR\b.*=.*)|(\bAND\b.*=.*)/i,
+    /(\bUNION\b.*\bSELECT\b)/i,
+    /(\bEXEC\b|\bEXECUTE\b)/i,
+    /(\bCHAR\b|\bCONCAT\b)/i,
+    /(\bWAITFOR\b.*\bDELAY\b)/i,
+    /(\bBENCHMARK\b)/i,
+    /(\bLOAD_FILE\b)/i,
+    /(\bINTO\b.*\bOUTFILE\b)/i,
+    /(\bINTO\b.*\bDUMPFILE\b)/i
+  ];
+  
+  return sqlInjectionPatterns.some(pattern => pattern.test(input));
+}
+
+// SQL Injection Protection: Validate SQL-safe identifier (for table/column names)
+function validateSQLIdentifier(identifier) {
+  if (typeof identifier !== 'string') {
+    return false;
+  }
+  
+  // Only allow alphanumeric, underscore, and must start with letter or underscore
+  // This prevents SQL injection via table/column name manipulation
+  return /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(identifier) && identifier.length <= 64;
+}
+
+// XSS Protection: Input sanitization middleware
+function sanitizeInput(obj) {
+  if (typeof obj === 'string') {
+    // Check for SQL injection first
+    if (detectSQLInjection(obj)) {
+      console.warn('⚠️  Potential SQL injection attempt detected:', obj.substring(0, 100));
+      // Don't block, but log - parameterized queries should still protect
+      // But we'll sanitize dangerous characters
+    }
+    
+    // Remove script tags and dangerous HTML
+    return obj
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+      .replace(/javascript:/gi, '')
+      .replace(/on\w+\s*=/gi, '')
+      .replace(/<iframe/gi, '&lt;iframe')
+      .replace(/<object/gi, '&lt;object')
+      .replace(/<embed/gi, '&lt;embed');
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(item => sanitizeInput(item));
+  }
+  if (obj && typeof obj === 'object') {
+    const sanitized = {};
+    for (const key in obj) {
+      sanitized[key] = sanitizeInput(obj[key]);
+    }
+    return sanitized;
+  }
+  return obj;
+}
+
+// SQL Injection Protection: Check all inputs for SQL injection attempts
+app.use((req, res, next) => {
+  const checkForSQLInjection = (obj, path = '') => {
+    if (typeof obj === 'string') {
+      if (detectSQLInjection(obj)) {
+        console.warn(`⚠️  SQL Injection attempt detected in ${path}:`, obj.substring(0, 100));
+        // Log but don't block - parameterized queries should protect
+        // In production, you might want to block or rate limit
+      }
+    } else if (Array.isArray(obj)) {
+      obj.forEach((item, index) => checkForSQLInjection(item, `${path}[${index}]`));
+    } else if (obj && typeof obj === 'object') {
+      for (const key in obj) {
+        checkForSQLInjection(obj[key], path ? `${path}.${key}` : key);
+      }
+    }
+  };
+  
+  if (req.body) {
+    checkForSQLInjection(req.body, 'body');
+    req.body = sanitizeInput(req.body);
+  }
+  if (req.query) {
+    checkForSQLInjection(req.query, 'query');
+    req.query = sanitizeInput(req.query);
+  }
+  if (req.params) {
+    checkForSQLInjection(req.params, 'params');
+    req.params = sanitizeInput(req.params);
+  }
+  next();
+});
+
 // Middleware to parse JSON bodies with increased limit for logo uploads
 app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+
+// Beta access: if BETA_REQUIRED and user has quickbooks_realmId cookie, ensure realm is allowed (used an invite code)
+app.use(async (req, res, next) => {
+  if (!BETA_REQUIRED) return next();
+  const realmId = req.cookies && req.cookies.quickbooks_realmId;
+  if (!realmId) return next();
+  const skipPaths = ['/auth/quickbooks/callback', '/api/beta/submit', '/api/beta/invite-codes'];
+  if (skipPaths.some(p => req.path === p || req.path.startsWith(p))) return next();
+  try {
+    const allowed = await db.isRealmAllowed(realmId);
+    if (allowed) return next();
+  } catch (e) {
+    return next(e);
+  }
+  res.clearCookie('quickbooks_realmId', { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION });
+  if (req.xhr || req.path.startsWith('/api/')) {
+    return res.status(403).json({ error: 'Beta access required', message: 'Your invite is no longer valid. Please use a new invite code.', betaRequired: true });
+  }
+  return res.redirect('/?beta=1');
+});
+
+// Restrict HTTP methods - only allow GET, POST, PUT, DELETE, OPTIONS
+// Block TRACE and other unused methods for security
+app.use((req, res, next) => {
+  const allowedMethods = ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'];
+  const method = req.method.toUpperCase();
+  
+  if (!allowedMethods.includes(method)) {
+    // Specifically block TRACE method (security risk)
+    if (method === 'TRACE') {
+      return res.status(405).json({ 
+        error: 'Method Not Allowed',
+        message: 'TRACE method is not allowed for security reasons'
+      });
+    }
+    // Block other unused methods
+    return res.status(405).json({ 
+      error: 'Method Not Allowed',
+      message: `HTTP method ${method} is not allowed`
+    });
+  }
+  next();
+});
+
+// Disable caching on all SSL/HTTPS pages
+app.use((req, res, next) => {
+  // Check if request is over HTTPS/SSL (handles both direct HTTPS and proxied requests)
+  const isSecure = req.secure || req.protocol === 'https' || req.get('X-Forwarded-Proto') === 'https';
+  
+  if (isSecure) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+  }
+  next();
+});
 
 // Serve static files from public directory
 app.use(express.static('public'));
 
+const csrfProtection = csrf({
+  cookie: {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_PRODUCTION
+  }
+});
+
+app.use(csrfProtection);
+
+app.use((req, res, next) => {
+  if (typeof req.csrfToken === 'function') {
+    try {
+      const token = req.csrfToken();
+      res.locals.csrfToken = token;
+      res.cookie('XSRF-TOKEN', token, {
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: IS_PRODUCTION
+      });
+    } catch (error) {
+      return next(error);
+    }
+  }
+  next();
+});
+
+// ===== ADMIN CONFIGURATION =====
+const ADMIN_COOKIE_NAME = 'admin_session';
+const ADMIN_DEFAULT_PASSWORD = 'Quisha';
+
+// Session management with expiration and security
+const adminSessions = new Map(); // Store session data with timestamps
+const SESSION_TIMEOUT = 30 * 60 * 1000; // 30 minutes of inactivity
+const MAX_LOGIN_ATTEMPTS = 5;
+const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes lockout
+const loginAttempts = new Map(); // Track failed login attempts by IP
+
+async function getAdminPasswordOption() {
+  try {
+    return await db.getOption(null, 'ADMIN_PASS');
+  } catch (error) {
+    console.error('❌ Error retrieving ADMIN_PASS option:', error);
+    return null;
+  }
+}
+
+async function ensureAdminPassword() {
+  let option = await getAdminPasswordOption();
+  
+  if (!option || !option.value) {
+    const encryptedDefault = Encryption.encrypt(ADMIN_DEFAULT_PASSWORD);
+    await db.setOption(null, 'ADMIN_PASS', encryptedDefault);
+    return encryptedDefault;
+  }
+  
+  if (!Encryption.isEncrypted(option.value)) {
+    const encryptedValue = Encryption.encrypt(option.value);
+    await db.setOption(option.organizationId ?? null, 'ADMIN_PASS', encryptedValue);
+    return encryptedValue;
+  }
+  
+  return option.value;
+}
+
+async function getDecryptedAdminPassword() {
+  try {
+    const encrypted = await ensureAdminPassword();
+    const decrypted = Encryption.decrypt(encrypted);
+    return decrypted || ADMIN_DEFAULT_PASSWORD;
+  } catch (error) {
+    console.warn('⚠️  Falling back to default admin password due to decryption issue:', error.message);
+    return ADMIN_DEFAULT_PASSWORD;
+  }
+}
+
+async function verifyAdminPassword(password) {
+  if (!password) return false;
+  const storedPassword = await getDecryptedAdminPassword();
+  return storedPassword === password;
+}
+
+function generateAdminSessionToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function createAdminSession(res, req) {
+  const token = generateAdminSessionToken();
+  const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
+  
+  // Store session with timestamp and client info
+  adminSessions.set(token, {
+    createdAt: Date.now(),
+    lastActivity: Date.now(),
+    clientIp: clientIp
+  });
+  
+  // Clear failed login attempts on successful login
+  loginAttempts.delete(clientIp);
+  
+  res.cookie(ADMIN_COOKIE_NAME, token, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_PRODUCTION,
+    maxAge: SESSION_TIMEOUT // Session expires after inactivity
+  });
+  return token;
+}
+
+function getAdminSessionToken(req) {
+  return req.cookies ? req.cookies[ADMIN_COOKIE_NAME] : null;
+}
+
+function isAdminAuthenticated(req) {
+  const token = getAdminSessionToken(req);
+  if (!token) return false;
+  
+  const session = adminSessions.get(token);
+  if (!session) return false;
+  
+  // Check if session has expired due to inactivity
+  const now = Date.now();
+  const timeSinceLastActivity = now - session.lastActivity;
+  
+  if (timeSinceLastActivity > SESSION_TIMEOUT) {
+    // Session expired - remove it
+    adminSessions.delete(token);
+    return false;
+  }
+  
+  // Update last activity timestamp
+  session.lastActivity = now;
+  return true;
+}
+
+function clearAdminSession(req, res) {
+  const token = getAdminSessionToken(req);
+  if (token) {
+    adminSessions.delete(token);
+  }
+  res.clearCookie(ADMIN_COOKIE_NAME, {
+    httpOnly: true,
+    sameSite: 'lax',
+    secure: IS_PRODUCTION
+  });
+}
+
+// Check if IP is locked out due to too many failed login attempts
+function isIpLockedOut(clientIp) {
+  const attempts = loginAttempts.get(clientIp);
+  if (!attempts) return false;
+  
+  const timeSinceFirstAttempt = Date.now() - attempts.firstAttempt;
+  
+  // If lockout period has passed, clear the attempts
+  if (timeSinceFirstAttempt > LOCKOUT_DURATION) {
+    loginAttempts.delete(clientIp);
+    return false;
+  }
+  
+  // Check if max attempts reached
+  return attempts.count >= MAX_LOGIN_ATTEMPTS;
+}
+
+// Record a failed login attempt
+function recordFailedLoginAttempt(clientIp) {
+  const attempts = loginAttempts.get(clientIp) || { count: 0, firstAttempt: Date.now() };
+  attempts.count++;
+  attempts.lastAttempt = Date.now();
+  loginAttempts.set(clientIp, attempts);
+}
+
+// Clean up expired sessions periodically
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, session] of adminSessions.entries()) {
+    if (now - session.lastActivity > SESSION_TIMEOUT) {
+      adminSessions.delete(token);
+    }
+  }
+}, 5 * 60 * 1000); // Clean up every 5 minutes
+
+function requireAdminAuth(req, res, next) {
+  if (!isAdminAuthenticated(req)) {
+    return res.status(401).json({ error: 'Admin authentication required' });
+  }
+  next();
+}
+
+async function getAdminData() {
+  const [companies, donors, transactionsRaw] = await Promise.all([
+    db.getAllOrganizations(),
+    db.getAllDonors(),
+    db.getAllTransactions()
+  ]);
+
+  const companyNameById = new Map();
+  companies.forEach(company => {
+    if (company && typeof company.id !== 'undefined') {
+      companyNameById.set(company.id, company.name || null);
+    }
+  });
+  
+  const donorsWithOrganization = donors.map(donor => {
+    const organizationName = donor.organizationId ? companyNameById.get(donor.organizationId) : null;
+    return {
+      ...donor,
+      organizationName: organizationName || null
+    };
+  });
+  
+  const transactionMap = new Map();
+  transactionsRaw.forEach(row => {
+    if (!transactionMap.has(row.id)) {
+      transactionMap.set(row.id, {
+        id: row.id,
+        date: row.date,
+        amount: row.transaction_total,
+        donor_name: row.donor_name || '—',
+        donor_email: row.donor_email || '—',
+        qb_docnum: row.qb_docnum || '—',
+        organizationId: row.organizationId || null,
+        organizationName: row.organizationId ? companyNameById.get(row.organizationId) || '—' : '—'
+      });
+    }
+  });
+  
+  const betaInviteCodes = await db.getAllBetaInviteCodes();
+  return {
+    companies,
+    donors: donorsWithOrganization,
+    transactions: Array.from(transactionMap.values()),
+    betaInviteCodes
+  };
+}
+
+ensureAdminPassword().catch(error => {
+  console.error('⚠️  Unable to initialize admin password:', error);
+});
+
+// ===== AUTHENTICATION MIDDLEWARE =====
+
+// List of public endpoints that don't require QuickBooks authentication
+const PUBLIC_ENDPOINTS = [
+  '/', // Main page (handles its own logic)
+  '/template', // Template manager page
+  '/auth/quickbooks', // QuickBooks OAuth initiation
+  '/auth/quickbooks/callback', // QuickBooks OAuth callback
+  '/receipts/', // Receipt viewing (may need org-specific checks later)
+];
+
+// Beta access: when true, only users with a valid invite code (bound to realm after OAuth) can use the app
+const BETA_REQUIRED = process.env.BETA_REQUIRED !== 'false';
+
+// List of public API endpoints (work before QuickBooks login)
+const PUBLIC_API_ENDPOINTS = [
+  '/api/quickbooks/status', // Status check (needed for login flow)
+  '/api/beta/submit',       // Submit invite code before OAuth
+  '/api/beta/invite-codes', // Create invite codes (admin only via BETA_ADMIN_SECRET)
+];
+
+// List of public API endpoint patterns (with parameter matching)
+const PUBLIC_API_PATTERNS = [
+  {
+    pattern: '/api/options/:key',
+    publicKeys: ['ShowOpeningScreen', 'showtermsofservice'] // These specific option keys are public
+  }
+];
+
+/**
+ * Middleware to check if an endpoint is public
+ */
+function isPublicEndpoint(req, publicEndpoints, publicPatterns) {
+  const path = req.path;
+  
+  // Check exact match
+  if (publicEndpoints.includes(path)) {
+    return true;
+  }
+  
+  // Check pattern matches (for routes with parameters)
+  for (const pattern of publicPatterns) {
+    const patternParts = pattern.pattern.split('/');
+    const pathParts = path.split('/');
+    
+    if (patternParts.length !== pathParts.length) {
+      continue;
+    }
+    
+    // Check if pattern matches (ignoring parameter parts)
+    let matches = true;
+    const params = {};
+    
+    for (let i = 0; i < patternParts.length; i++) {
+      if (patternParts[i].startsWith(':')) {
+        // This is a parameter - store it
+        const paramName = patternParts[i].substring(1);
+        params[paramName] = pathParts[i];
+      } else if (patternParts[i] !== pathParts[i]) {
+        matches = false;
+        break;
+      }
+    }
+    
+    if (matches) {
+      // Check if the parameter values are in the public list
+      if (pattern.publicKeys) {
+        for (const [key, value] of Object.entries(params)) {
+          if (pattern.publicKeys.includes(value)) {
+            return true;
+          }
+        }
+      } else {
+        // No publicKeys restriction - all values are public
+        return true;
+      }
+    }
+  }
+  
+  // Check prefix match for routes like /receipts/:id
+  const prefixEndpoints = ['/receipts/'];
+  for (const endpoint of prefixEndpoints) {
+    if (endpoint.endsWith('/') && path.startsWith(endpoint)) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+// ===== OPTIONS API ROUTES (PUBLIC OR CONDITIONAL AUTH) =====
+
+// Get option by key
+app.get('/api/options/:key', async (req, res) => {
+  try {
+    const { key } = req.params;
+    const realmId = req.cookies.quickbooks_realmId;
+    
+    // List of options that don't require QuickBooks connection (browser-based)
+    const globalOptions = ['ShowOpeningScreen', 'showtermsofservice'];
+    
+    // Check if realmId is required for this option
+    const requiresQuickbooks = !globalOptions.includes(key);
+    
+    if (requiresQuickbooks && !realmId) {
+      return res.status(400).json({ error: 'No QuickBooks connection found' });
+    }
+    
+    // For global options without QuickBooks, use null organizationId
+    let organizationId = null;
+    if (realmId) {
+      const organization = await db.getOrganizationByQbId(realmId);
+      if (!organization) {
+        // For global options, allow proceeding without organization
+        if (requiresQuickbooks) {
+          return res.status(404).json({ error: 'Organization not found' });
+        }
+      } else {
+        organizationId = organization.id;
+      }
+    }
+    
+    const option = await db.getOption(organizationId, key);
+    
+    if (option) {
+      res.json(option);
+    } else {
+      res.status(404).json({ error: 'Option not found' });
+    }
+  } catch (error) {
+    console.error('Error fetching option:', error);
+    res.status(500).json({ error: 'Failed to fetch option' });
+  }
+});
+
+// Set/update option
+app.post('/api/options/:key', async (req, res) => {
+  try {
+    const { key } = req.params;
+    const { value } = req.body;
+    const realmId = req.cookies.quickbooks_realmId;
+    
+    // List of options that don't require QuickBooks connection (browser-based)
+    const globalOptions = ['ShowOpeningScreen', 'showtermsofservice'];
+    
+    // Check if realmId is required for this option
+    const requiresQuickbooks = !globalOptions.includes(key);
+    
+    if (requiresQuickbooks && !realmId) {
+      return res.status(400).json({ error: 'No QuickBooks connection found' });
+    }
+    
+    if (value === undefined) {
+      return res.status(400).json({ error: 'Value is required' });
+    }
+    
+    // For global options without QuickBooks, use null organizationId
+    let organizationId = null;
+    if (realmId) {
+      const organization = await db.getOrganizationByQbId(realmId);
+      if (!organization) {
+        // For global options, allow proceeding without organization
+        if (requiresQuickbooks) {
+          return res.status(404).json({ error: 'Organization not found' });
+        }
+      } else {
+        organizationId = organization.id;
+      }
+    }
+    
+    const result = await db.setOption(organizationId, key, value);
+    
+    res.json({
+      message: 'Option saved successfully',
+      option: result
+    });
+  } catch (error) {
+    console.error('Error saving option:', error);
+    res.status(500).json({ error: 'Failed to save option' });
+  }
+});
+
+// Delete option
+app.delete('/api/options/:key', async (req, res) => {
+  try {
+    const { key } = req.params;
+    const realmId = req.cookies.quickbooks_realmId;
+    
+    // List of options that don't require QuickBooks connection (browser-based)
+    const globalOptions = ['ShowOpeningScreen', 'showtermsofservice'];
+    
+    // Check if realmId is required for this option
+    const requiresQuickbooks = !globalOptions.includes(key);
+    
+    if (requiresQuickbooks && !realmId) {
+      return res.status(400).json({ error: 'No QuickBooks connection found' });
+    }
+    
+    // For global options without QuickBooks, use null organizationId
+    let organizationId = null;
+    if (realmId) {
+      const organization = await db.getOrganizationByQbId(realmId);
+      if (!organization) {
+        // For global options, allow proceeding without organization
+        if (requiresQuickbooks) {
+          return res.status(404).json({ error: 'Organization not found' });
+        }
+      } else {
+        organizationId = organization.id;
+      }
+    }
+    
+    const deleted = await db.deleteOption(organizationId, key);
+    
+    if (deleted) {
+      res.json({ message: 'Option deleted successfully' });
+    } else {
+      res.status(404).json({ error: 'Option not found' });
+    }
+  } catch (error) {
+    console.error('Error deleting option:', error);
+    res.status(500).json({ error: 'Failed to delete option' });
+  }
+});
+
+/**
+ * Authentication middleware for protected API endpoints
+ * Validates that user has a valid QuickBooks connection (cookie)
+ */
+function requireAuth(req, res, next) {
+  // Check if this is a public endpoint
+  if (isPublicEndpoint(req, PUBLIC_API_ENDPOINTS, PUBLIC_API_PATTERNS)) {
+    return next();
+  }
+  
+  // Check if QuickBooks realmId cookie exists
+  const realmId = req.cookies && req.cookies.quickbooks_realmId;
+  
+  if (!realmId) {
+    return res.status(401).json({ 
+      error: 'Authentication required',
+      message: 'Please connect to QuickBooks first',
+      requiresAuth: true
+    });
+  }
+  
+  // Verify that the organization exists for this realmId
+  db.getOrganizationByQbId(realmId)
+    .then(organization => {
+      if (!organization) {
+        return res.status(401).json({ 
+          error: 'Invalid QuickBooks connection',
+          message: 'Organization not found for this connection',
+          requiresAuth: true
+        });
+      }
+      
+      // Add organization to request for use in route handlers
+      req.organization = organization;
+      next();
+    })
+    .catch(error => {
+      console.error('Error verifying organization:', error);
+      return res.status(500).json({ 
+        error: 'Authentication verification failed',
+        message: 'Unable to verify QuickBooks connection'
+      });
+    });
+}
+
+// Apply authentication middleware to all /api/* routes
+app.use('/api', requireAuth);
+
+// ===== GOBLUE ROUTES =====
+app.get('/goblue', async (req, res) => {
+  try {
+    await ensureAdminPassword();
+    const authenticated = isAdminAuthenticated(req);
+    let adminData = { companies: [], donors: [], transactions: [], betaInviteCodes: [] };
+    
+    if (authenticated) {
+      adminData = await getAdminData();
+    }
+    
+    res.render('goblue', {
+      isAuthenticated: authenticated,
+      adminData
+    });
+  } catch (error) {
+    console.error('❌ Error rendering admin page:', error);
+    res.status(500).send('Admin page is unavailable at the moment.');
+  }
+});
+
+app.post('/goblue/login', async (req, res) => {
+  try {
+    await ensureAdminPassword();
+    const { password } = req.body || {};
+    const clientIp = req.ip || req.connection.remoteAddress || 'unknown';
+    
+    if (!password) {
+      return res.status(400).json({ error: 'Password is required' });
+    }
+    
+    // Check if IP is locked out due to too many failed attempts
+    if (isIpLockedOut(clientIp)) {
+      const attempts = loginAttempts.get(clientIp);
+      const remainingTime = Math.ceil((LOCKOUT_DURATION - (Date.now() - attempts.firstAttempt)) / 1000 / 60);
+      return res.status(429).json({ 
+        error: 'Too many failed login attempts',
+        message: `Account temporarily locked. Please try again in ${remainingTime} minute(s).`
+      });
+    }
+    
+    const valid = await verifyAdminPassword(password);
+    if (!valid) {
+      // Record failed attempt
+      recordFailedLoginAttempt(clientIp);
+      const attempts = loginAttempts.get(clientIp);
+      const remainingAttempts = MAX_LOGIN_ATTEMPTS - attempts.count;
+      
+      return res.status(401).json({ 
+        error: 'Invalid password',
+        remainingAttempts: remainingAttempts > 0 ? remainingAttempts : 0,
+        locked: remainingAttempts <= 0
+      });
+    }
+    
+    // Successful login - create session and clear failed attempts
+    createAdminSession(res, req);
+    res.json({ message: 'Admin access granted' });
+  } catch (error) {
+    console.error('❌ Error processing admin login:', error);
+    res.status(500).json({ error: 'Failed to process login' });
+  }
+});
+
+app.post('/goblue/logout', (req, res) => {
+  try {
+    clearAdminSession(req, res);
+    res.json({ message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('❌ Error during admin logout:', error);
+    res.status(500).json({ error: 'Failed to logout' });
+  }
+});
+
+// Password complexity validation
+function validatePasswordComplexity(password) {
+  if (!password || typeof password !== 'string') {
+    return { valid: false, error: 'Password must be a string' };
+  }
+  
+  if (password.length < 8) {
+    return { valid: false, error: 'Password must be at least 8 characters long' };
+  }
+  
+  if (password.length > 128) {
+    return { valid: false, error: 'Password must be less than 128 characters' };
+  }
+  
+  // Check for at least one uppercase letter
+  if (!/[A-Z]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one uppercase letter' };
+  }
+  
+  // Check for at least one lowercase letter
+  if (!/[a-z]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one lowercase letter' };
+  }
+  
+  // Check for at least one number
+  if (!/[0-9]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one number' };
+  }
+  
+  // Check for at least one special character
+  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one special character' };
+  }
+  
+  return { valid: true };
+}
+
+app.post('/goblue/password', requireAdminAuth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body || {};
+    
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: 'Current and new passwords are required' });
+    }
+    
+    // Validate password complexity
+    const complexityCheck = validatePasswordComplexity(newPassword);
+    if (!complexityCheck.valid) {
+      return res.status(400).json({ error: complexityCheck.error });
+    }
+    
+    // Check if new password is the same as current
+    if (currentPassword === newPassword) {
+      return res.status(400).json({ error: 'New password must be different from current password' });
+    }
+    
+    const validCurrent = await verifyAdminPassword(currentPassword);
+    if (!validCurrent) {
+      return res.status(401).json({ error: 'Current password is incorrect' });
+    }
+    
+    const encrypted = Encryption.encrypt(newPassword);
+    await db.setOption(null, 'ADMIN_PASS', encrypted);
+    clearAdminSession(req, res);
+    
+    res.json({ message: 'Password updated. Please sign in again.' });
+  } catch (error) {
+    console.error('❌ Error updating admin password:', error);
+    res.status(500).json({ error: 'Failed to update password' });
+  }
+});
+
+// Options management endpoints
+app.get('/goblue/options', requireAdminAuth, async (req, res) => {
+  try {
+    // Get all global options (organizationId = null)
+    const options = await db.getOptionsByOrganizationId(null);
+    res.json({ options });
+  } catch (error) {
+    console.error('❌ Error fetching options:', error);
+    res.status(500).json({ error: 'Failed to fetch options' });
+  }
+});
+
+app.post('/goblue/options', requireAdminAuth, async (req, res) => {
+  try {
+    const { key, value } = req.body || {};
+    
+    console.log('📝 Saving option:', { key, valueType: typeof value, hasValue: value !== undefined });
+    
+    if (!key || typeof key !== 'string' || key.trim() === '') {
+      return res.status(400).json({ error: 'Key is required and must be a non-empty string' });
+    }
+    
+    if (value === undefined || value === null) {
+      return res.status(400).json({ error: 'Value is required' });
+    }
+    
+    // Store as global option (organizationId = null)
+    await db.setOption(null, key.trim(), String(value));
+    
+    console.log('✅ Option saved successfully:', key.trim());
+    res.json({ message: 'Option saved successfully', key: key.trim(), value: String(value) });
+  } catch (error) {
+    console.error('❌ Error saving option:', error);
+    console.error('❌ Error stack:', error.stack);
+    res.status(500).json({ error: 'Failed to save option', details: error.message });
+  }
+});
+
+// Beta: create invite code (GoBlue admin only; no BETA_ADMIN_SECRET needed)
+app.post('/goblue/beta/invite-codes', requireAdminAuth, express.json(), async (req, res) => {
+  const code = req.body && req.body.code ? String(req.body.code).trim() : '';
+  if (!code) {
+    return res.status(400).json({ error: 'code is required', message: 'Provide a code in the request body' });
+  }
+  try {
+    const result = await db.createBetaInviteCode(code);
+    res.status(201).json({ ok: true, code: result.code, id: result.id });
+  } catch (e) {
+    if (e.message === 'Code already exists') {
+      return res.status(409).json({ error: 'Code already exists', message: e.message });
+    }
+    console.error('GoBlue beta create code error:', e);
+    res.status(500).json({ error: 'Could not create invite code' });
+  }
+});
+
+app.delete('/goblue/options/:key', requireAdminAuth, async (req, res) => {
+  try {
+    const { key } = req.params;
+    
+    if (!key) {
+      return res.status(400).json({ error: 'Key is required' });
+    }
+    
+    // Delete global option (organizationId = null)
+    const option = await db.getOption(null, key);
+    if (!option) {
+      return res.status(404).json({ error: 'Option not found' });
+    }
+    
+    await db.deleteOption(null, key);
+    
+    res.json({ message: 'Option deleted successfully', key });
+  } catch (error) {
+    console.error('❌ Error deleting option:', error);
+    res.status(500).json({ error: 'Failed to delete option' });
+  }
+});
+
+app.get('/goblue/data', requireAdminAuth, async (req, res) => {
+  try {
+    const adminData = await getAdminData();
+    res.json(adminData);
+  } catch (error) {
+    console.error('❌ Error fetching admin data:', error);
+    res.status(500).json({ error: 'Failed to fetch admin data' });
+  }
+});
+
 // Template manager page
 app.get('/template', (req, res) => {
   res.render('template-manager');
+});
+
+// Beta: submit invite code before connecting to QuickBooks (sets cookie for OAuth callback)
+app.post('/api/beta/submit', express.json(), async (req, res) => {
+  if (!BETA_REQUIRED) {
+    return res.json({ ok: true, message: 'Beta not required' });
+  }
+  const code = req.body && req.body.code ? String(req.body.code).trim() : '';
+  if (!code) {
+    return res.status(400).json({ error: 'Invite code is required', betaRequired: true });
+  }
+  try {
+    const row = await db.getBetaInviteCodeByCode(code);
+    if (!row) {
+      return res.status(400).json({ error: 'Invalid invite code', betaRequired: true });
+    }
+    if (row.used_at) {
+      return res.status(400).json({ error: 'This invite code has already been used', betaRequired: true });
+    }
+    res.cookie('beta_invite_code', code, {
+      maxAge: 15 * 60 * 1000, // 15 minutes
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: IS_PRODUCTION
+    });
+    res.json({ ok: true, message: 'Invite code accepted. You can now connect to QuickBooks.' });
+  } catch (e) {
+    console.error('Beta submit error:', e);
+    res.status(500).json({ error: 'Could not validate invite code', betaRequired: true });
+  }
+});
+
+// Beta: create a new invite code (admin only; set BETA_ADMIN_SECRET in env)
+app.post('/api/beta/invite-codes', express.json(), async (req, res) => {
+  const secret = process.env.BETA_ADMIN_SECRET;
+  const provided = req.headers['x-beta-admin-secret'] || (req.body && req.body.secret) || '';
+  if (!secret || provided !== secret) {
+    return res.status(403).json({ error: 'Forbidden', message: 'Invalid or missing admin secret' });
+  }
+  const code = req.body && req.body.code ? String(req.body.code).trim() : '';
+  if (!code) {
+    return res.status(400).json({ error: 'code is required', message: 'Provide a code in the request body' });
+  }
+  try {
+    const result = await db.createBetaInviteCode(code);
+    res.status(201).json({ ok: true, code: result.code, id: result.id });
+  } catch (e) {
+    if (e.message === 'Code already exists') {
+      return res.status(409).json({ error: 'Code already exists', message: e.message });
+    }
+    console.error('Beta create code error:', e);
+    res.status(500).json({ error: 'Could not create invite code' });
+  }
 });
 
 // Basic route for Hello World
@@ -165,13 +1239,21 @@ app.get('/', async (req, res) => {
     // Check if this is a redirect from QuickBooks connection success
     const quickbooksConnected = req.query.quickbooks_connected === 'true';
     
-    // Check if user is logged into QuickBooks
-    const isLoggedInToQuickbooks = !!(req.cookies && req.cookies.quickbooks_realmId);
+    // Check if user is logged into QuickBooks - verify actual token status, not just cookie
+    let isLoggedInToQuickbooks = false;
+    if (req.cookies && req.cookies.quickbooks_realmId) {
+      // Check if QuickBooks instance actually has a valid token
+      const status = quickbooks.getSyncStatus();
+      isLoggedInToQuickbooks = status.isAuthenticated && status.realmId === req.cookies.quickbooks_realmId;
+    }
     
+    const betaError = req.query.beta === '1' ? (req.query.error || 'code_required') : null;
     res.render('table', { 
       data,
       quickbooksConnected: quickbooksConnected,
       isLoggedInToQuickbooks: isLoggedInToQuickbooks,
+      betaRequireCode: BETA_REQUIRED,
+      betaError: betaError || null,
       transactionItems: JSON.stringify(Array.from(transactionMap.values()).reduce((acc, transaction) => {
         acc[transaction.id] = transaction.items;
         return acc;
@@ -529,14 +1611,20 @@ app.post('/api/donors/sync-all-from-transactions', async (req, res) => {
 });
 
 // Quickbooks authentication routes
-app.get('/auth/quickbooks', (req, res) => {
+app.get('/auth/quickbooks', async (req, res) => {
   try {
-    const authData = quickbooks.generateAuthURL();
+    const authData = await quickbooks.generateAuthURL();
     // Store state in session or database for security
     res.redirect(authData.url);
   } catch (error) {
-    console.error('Error generating auth URL:', error);
-    res.status(500).json({ error: 'Failed to generate authentication URL' });
+    console.error('❌ Error generating auth URL:', error);
+    console.error('❌ Error details:', error.message);
+    console.error('❌ Error stack:', error.stack);
+    res.status(500).json({ 
+      error: 'Failed to generate authentication URL',
+      message: error.message || 'Unknown error',
+      details: 'Check server logs for more information. Ensure QuickBooks credentials are configured.'
+    });
   }
 });
 
@@ -568,20 +1656,57 @@ app.get('/auth/quickbooks/callback', async (req, res) => {
     console.log(`   Token expires: ${new Date(tokenData.expiresIn * 1000).toISOString()}`);
     console.log(`   Environment: ${quickbooks.environment}`);
     
+    // Beta access: require valid invite code or existing allowed realm
+    if (BETA_REQUIRED) {
+      const betaCode = req.cookies && req.cookies.beta_invite_code ? String(req.cookies.beta_invite_code).trim() : '';
+      if (betaCode) {
+        const row = await db.getBetaInviteCodeByCode(betaCode);
+        if (!row || row.used_at) {
+          res.clearCookie('beta_invite_code', { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION });
+          return res.redirect('/?beta=1&error=invalid_code');
+        }
+        const { used } = await db.useBetaInviteCode(betaCode, realmId);
+        if (!used) {
+          res.clearCookie('beta_invite_code', { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION });
+          return res.redirect('/?beta=1&error=invalid_code');
+        }
+        res.clearCookie('beta_invite_code', { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION });
+      } else {
+        const allowed = await db.isRealmAllowed(realmId);
+        if (!allowed) {
+          return res.redirect('/?beta=1&error=code_required');
+        }
+      }
+    }
+    
     // Store realmId as a cookie (expires in 30 days)
     res.cookie('quickbooks_realmId', realmId, {
       maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production'
+      sameSite: 'lax', // CSRF protection
+      secure: IS_PRODUCTION
     });
     
     // Clear the lastOrganizationId cookie since we have a new active connection
-    res.clearCookie('lastOrganizationId');
+    res.clearCookie('lastOrganizationId', {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: IS_PRODUCTION
+    });
     
     // Log cookie storage success
     console.log('🍪 Cookie stored successfully!');
     console.log(`   Realm ID stored in cookie: ${realmId}`);
     console.log(`   Cookie expires in 30 days`);
+    
+    // Beta: record login for this realm (login count + last login time)
+    if (BETA_REQUIRED) {
+      try {
+        await db.incrementBetaLoginCount(realmId);
+      } catch (e) {
+        console.warn('⚠️ Beta login count increment failed (non-critical):', e.message);
+      }
+    }
     
     // Auto-sync organization if it doesn't exist
     try {
@@ -728,14 +1853,19 @@ app.post('/api/quickbooks/disconnect', async (req, res) => {
     await quickbooks.fullDisconnect();
     
     // Clear the realmId cookie but store the last organization ID
-    res.clearCookie('quickbooks_realmId');
+    res.clearCookie('quickbooks_realmId', {
+      httpOnly: true,
+      sameSite: 'lax',
+      secure: IS_PRODUCTION
+    });
     
     // Store the last organization ID in a cookie (expires in 30 days)
     if (lastOrganizationId) {
       res.cookie('lastOrganizationId', lastOrganizationId.toString(), {
         maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
         httpOnly: true,
-        secure: false // Set to true in production with HTTPS
+        sameSite: 'lax',
+        secure: IS_PRODUCTION
       });
       console.log(`   Last organization ID stored: ${lastOrganizationId}`);
     }
@@ -901,9 +2031,14 @@ app.get('/api/quickbooks/transactions', async (req, res) => {
 
     
 
+    // Calculate start of previous calendar year (last two calendar years)
+    const currentYear = new Date().getFullYear();
+    const previousYear = currentYear - 1;
+    const startOfPreviousYear = new Date(previousYear, 0, 1).toISOString().split('T')[0]; // January 1 of previous year
+    
     // Get query parameters from request with defaults
     const queryParams = {
-      start_date: req.query.start_date || new Date(Date.now() - 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0], // 7 days ago
+      start_date: req.query.start_date || startOfPreviousYear, // Start of previous calendar year (last two calendar years)
       end_date: req.query.end_date || new Date().toISOString().split('T')[0], // today
       report_type: req.query.report_type || 'TransactionList',
       transaction_type: req.query.transaction_type || 'SalesReceipt',
@@ -2175,14 +3310,37 @@ app.post('/api/receipts/email', async (req, res) => {
     }
     
     // Get organization information
-    const organization = await db.getOrganizationByQbId(req.cookies.quickbooks_realmId) || 
-                        (await db.getAllOrganizations())[0];
+    const realmId = req.cookies.quickbooks_realmId;
+    const organization = realmId ? await db.getOrganizationByQbId(realmId) : null;
+    
+    if (!organization) {
+      const allOrgs = await db.getAllOrganizations();
+      if (allOrgs.length > 0) {
+        organization = allOrgs[0];
+      }
+    }
     
     if (!organization) {
       return res.status(404).json({ error: 'Organization not found' });
     }
     
+    // Get email settings and create transporter
+    const transporter = await createTransporterFromSettings(organization.id) || emailTransporter;
+    
+    // Get from email address from settings or use default
+    const useCustomOption = await db.getOption(organization.id, 'EMAIL_USE_CUSTOM').then(opt => opt ? opt.value : null).catch(() => null);
+    const useCustom = useCustomOption === 'true';
+    
+    let emailFrom;
+    if (useCustom) {
+      const emailFromOption = await db.getOption(organization.id, 'EMAIL_FROM').then(opt => opt ? opt.value : null).catch(() => null);
+      emailFrom = emailFromOption || process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@donationapp.com';
+    } else {
+      emailFrom = process.env.EMAIL_FROM || process.env.EMAIL_USER || 'noreply@donationapp.com';
+    }
+    
     // Create email content
+    const userMessage = (message && message.trim()) ? message.trim() : '';
     const emailContent = {
       to: email,
       subject: subject || 'Your Donation Receipt',
@@ -2190,8 +3348,7 @@ app.post('/api/receipts/email', async (req, res) => {
         <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
           <h2>Thank you for your donation!</h2>
           <p>Dear ${donor.name},</p>
-          <p>Thank you for your generous donation to ${organization.name}.</p>
-          ${message ? `<p>${message.replace(/\n/g, '<br>')}</p>` : ''}
+          ${userMessage ? `<p>${userMessage.replace(/\n/g, '<br>')}</p>` : ''}
           <p>Please find your receipt attached to this email.</p>
           <p>Best regards,<br>
           ${organization.contact || 'Primary Contact'}<br>
@@ -2210,14 +3367,14 @@ app.post('/api/receipts/email', async (req, res) => {
     
     // Send email using the configured transporter
     const mailOptions = {
-      from: process.env.EMAIL_USER,
+      from: emailFrom,
       to: emailContent.to,
       subject: emailContent.subject,
       html: emailContent.html,
       attachments: emailContent.attachments
     };
     
-    await emailTransporter.sendMail(mailOptions);
+    await transporter.sendMail(mailOptions);
     console.log('📧 Email sent successfully to:', emailContent.to);
     
     // Update receipt as sent
@@ -2311,139 +3468,281 @@ app.delete('/api/feedback/:id', async (req, res) => {
   }
 });
 
-// ===== OPTIONS API ROUTES =====
 
-// Get option by key
-app.get('/api/options/:key', async (req, res) => {
+// ===== EMAIL SETTINGS API ROUTES =====
+
+// Get email settings for current organization
+app.get('/api/email/settings', async (req, res) => {
   try {
-    const { key } = req.params;
     const realmId = req.cookies.quickbooks_realmId;
     
-    // List of options that don't require QuickBooks connection (browser-based)
-    const globalOptions = ['ShowOpeningScreen', 'showtermsofservice'];
-    
-    // Check if realmId is required for this option
-    const requiresQuickbooks = !globalOptions.includes(key);
-    
-    if (requiresQuickbooks && !realmId) {
+    if (!realmId) {
       return res.status(400).json({ error: 'No QuickBooks connection found' });
     }
     
-    // For global options without QuickBooks, use null organizationId
-    let organizationId = null;
-    if (realmId) {
-      const organization = await db.getOrganizationByQbId(realmId);
-      if (!organization) {
-        // For global options, allow proceeding without organization
-        if (requiresQuickbooks) {
-          return res.status(404).json({ error: 'Organization not found' });
-        }
-      } else {
-        organizationId = organization.id;
-      }
+    const organization = await db.getOrganizationByQbId(realmId);
+    if (!organization) {
+      return res.status(404).json({ error: 'Organization not found' });
     }
     
-    const option = await db.getOption(organizationId, key);
+    // Check if custom email is enabled (default to false if not set)
+    const useCustomOption = await db.getOption(organization.id, 'EMAIL_USE_CUSTOM').then(opt => opt ? opt.value : null).catch(() => null);
+    const useCustom = useCustomOption === 'true';
     
-    if (option) {
-      res.json(option);
+    // Get all email settings from options
+    const emailSettings = {
+      useCustom: useCustom,
+      from: await db.getOption(organization.id, 'EMAIL_FROM').then(opt => opt ? opt.value : null).catch(() => null),
+      host: await db.getOption(organization.id, 'EMAIL_HOST').then(opt => opt ? opt.value : null).catch(() => null),
+      port: await db.getOption(organization.id, 'EMAIL_PORT').then(opt => opt ? opt.value : null).catch(() => null),
+      secure: await db.getOption(organization.id, 'EMAIL_SECURE').then(opt => opt ? opt.value : 'false').catch(() => 'false'),
+      user: await db.getOption(organization.id, 'EMAIL_USER').then(opt => opt ? opt.value : null).catch(() => null),
+      // Don't return password, just indicate if it's set
+      hasPassword: await db.getOption(organization.id, 'EMAIL_PASS').then(opt => !!opt).catch(() => false)
+    };
+    
+    // If custom email is not enabled, return environment variables
+    if (!useCustom) {
+      emailSettings.from = process.env.EMAIL_FROM || process.env.EMAIL_USER || '';
+      emailSettings.host = process.env.EMAIL_HOST || 'smtp.gmail.com';
+      emailSettings.port = process.env.EMAIL_PORT || '587';
+      emailSettings.secure = process.env.EMAIL_SECURE === 'true' ? 'true' : 'false';
+      emailSettings.user = process.env.EMAIL_USER || '';
+      emailSettings.hasPassword = !!(process.env.EMAIL_PASS);
     } else {
-      res.status(404).json({ error: 'Option not found' });
+      // Use environment variables as defaults if not set in database
+      emailSettings.from = emailSettings.from || process.env.EMAIL_FROM || process.env.EMAIL_USER || '';
+      emailSettings.host = emailSettings.host || process.env.EMAIL_HOST || 'smtp.gmail.com';
+      emailSettings.port = emailSettings.port || process.env.EMAIL_PORT || '587';
+      emailSettings.secure = emailSettings.secure || (process.env.EMAIL_SECURE === 'true' ? 'true' : 'false');
+      emailSettings.user = emailSettings.user || process.env.EMAIL_USER || '';
     }
+    
+    res.json(emailSettings);
   } catch (error) {
-    console.error('Error fetching option:', error);
-    res.status(500).json({ error: 'Failed to fetch option' });
+    console.error('Error fetching email settings:', error);
+    res.status(500).json({ error: 'Failed to fetch email settings' });
   }
 });
 
-// Set/update option
-app.post('/api/options/:key', async (req, res) => {
+// Save email settings for current organization
+app.post('/api/email/settings', async (req, res) => {
   try {
-    const { key } = req.params;
-    const { value } = req.body;
     const realmId = req.cookies.quickbooks_realmId;
     
-    // List of options that don't require QuickBooks connection (browser-based)
-    const globalOptions = ['ShowOpeningScreen', 'showtermsofservice'];
-    
-    // Check if realmId is required for this option
-    const requiresQuickbooks = !globalOptions.includes(key);
-    
-    if (requiresQuickbooks && !realmId) {
+    if (!realmId) {
       return res.status(400).json({ error: 'No QuickBooks connection found' });
     }
     
-    if (value === undefined) {
-      return res.status(400).json({ error: 'Value is required' });
+    const organization = await db.getOrganizationByQbId(realmId);
+    if (!organization) {
+      return res.status(404).json({ error: 'Organization not found' });
     }
     
-    // For global options without QuickBooks, use null organizationId
-    let organizationId = null;
-    if (realmId) {
-      const organization = await db.getOrganizationByQbId(realmId);
-      if (!organization) {
-        // For global options, allow proceeding without organization
-        if (requiresQuickbooks) {
-          return res.status(404).json({ error: 'Organization not found' });
-        }
-      } else {
-        organizationId = organization.id;
+    const { useCustom, from, host, port, secure, user, pass } = req.body;
+    
+    // Save the useCustom flag
+    await db.setOption(organization.id, 'EMAIL_USE_CUSTOM', useCustom ? 'true' : 'false');
+    
+    // If custom email is enabled, save custom settings
+    if (useCustom) {
+      // Validate required fields
+      if (!from || !host || !port || !user) {
+        return res.status(400).json({ error: 'From email, host, port, and username are required' });
       }
+      
+      // Validate port is a number
+      const portNum = parseInt(port);
+      if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+        return res.status(400).json({ error: 'Port must be a number between 1 and 65535' });
+      }
+      
+      // Import encryption for password
+      const Encryption = require('./encryption');
+      
+      // Save email settings
+      await db.setOption(organization.id, 'EMAIL_FROM', from);
+      await db.setOption(organization.id, 'EMAIL_HOST', host);
+      await db.setOption(organization.id, 'EMAIL_PORT', port.toString());
+      await db.setOption(organization.id, 'EMAIL_SECURE', secure ? 'true' : 'false');
+      await db.setOption(organization.id, 'EMAIL_USER', user);
+      
+      // Only update password if provided
+      if (pass && pass.trim() !== '') {
+        // Encrypt password before storing
+        const encryptedPassword = Encryption.encrypt(pass);
+        await db.setOption(organization.id, 'EMAIL_PASS', encryptedPassword);
+      }
+      
+      // Update nodemailer transporter with new settings
+      updateEmailTransporter(organization.id);
+    } else {
+      // If custom email is disabled, use environment variables
+      // Don't delete the custom settings, just ignore them
+      // This allows users to switch back to custom settings later
     }
     
-    const result = await db.setOption(organizationId, key, value);
-    
-    res.json({
-      message: 'Option saved successfully',
-      option: result
+    res.json({ 
+      message: useCustom ? 'Custom email settings saved successfully' : 'Now using default email settings from environment variables',
+      settings: {
+        useCustom: useCustom,
+        from: useCustom ? from : (process.env.EMAIL_FROM || process.env.EMAIL_USER || ''),
+        host: useCustom ? host : (process.env.EMAIL_HOST || 'smtp.gmail.com'),
+        port: useCustom ? port : (process.env.EMAIL_PORT || '587'),
+        secure: useCustom ? secure : (process.env.EMAIL_SECURE === 'true'),
+        user: useCustom ? user : (process.env.EMAIL_USER || ''),
+        hasPassword: useCustom ? !!(pass && pass.trim() !== '') : !!(process.env.EMAIL_PASS)
+      }
     });
   } catch (error) {
-    console.error('Error saving option:', error);
-    res.status(500).json({ error: 'Failed to save option' });
+    console.error('Error saving email settings:', error);
+    res.status(500).json({ error: 'Failed to save email settings: ' + error.message });
   }
 });
 
-// Delete option
-app.delete('/api/options/:key', async (req, res) => {
+// Test email connection
+app.post('/api/email/test', async (req, res) => {
   try {
-    const { key } = req.params;
     const realmId = req.cookies.quickbooks_realmId;
     
-    // List of options that don't require QuickBooks connection (browser-based)
-    const globalOptions = ['ShowOpeningScreen', 'showtermsofservice'];
-    
-    // Check if realmId is required for this option
-    const requiresQuickbooks = !globalOptions.includes(key);
-    
-    if (requiresQuickbooks && !realmId) {
+    if (!realmId) {
       return res.status(400).json({ error: 'No QuickBooks connection found' });
     }
     
-    // For global options without QuickBooks, use null organizationId
-    let organizationId = null;
-    if (realmId) {
-      const organization = await db.getOrganizationByQbId(realmId);
-      if (!organization) {
-        // For global options, allow proceeding without organization
-        if (requiresQuickbooks) {
-          return res.status(404).json({ error: 'Organization not found' });
-        }
-      } else {
-        organizationId = organization.id;
-      }
+    const organization = await db.getOrganizationByQbId(realmId);
+    if (!organization) {
+      return res.status(404).json({ error: 'Organization not found' });
     }
     
-    const result = await db.deleteOption(organizationId, key);
+    // Create a test transporter with current settings
+    const testTransporter = await createTransporterFromSettings(organization.id);
     
-    if (result.deleted) {
-      res.json({ message: 'Option deleted successfully' });
+    if (!testTransporter) {
+      return res.status(400).json({ error: 'Email settings not configured' });
+    }
+    
+    // Verify connection
+    testTransporter.verify((error, success) => {
+      if (error) {
+        console.error('Email connection test failed:', error);
+        res.status(400).json({ 
+          success: false,
+          error: 'Connection test failed',
+          message: error.message 
+        });
+      } else {
+        console.log('✅ Email connection test successful');
+        res.json({ 
+          success: true,
+          message: 'Email connection test successful'
+        });
+      }
+    });
+  } catch (error) {
+    console.error('Error testing email connection:', error);
+    res.status(500).json({ error: 'Failed to test email connection: ' + error.message });
+  }
+});
+
+// Helper function to create transporter from database settings
+async function createTransporterFromSettings(organizationId) {
+  try {
+    // Check if custom email is enabled
+    const useCustomOption = await db.getOption(organizationId, 'EMAIL_USE_CUSTOM').then(opt => opt ? opt.value : null).catch(() => null);
+    const useCustom = useCustomOption === 'true';
+
+    const Encryption = require('./encryption');
+    let emailSettings;
+
+    if (useCustom) {
+      // Use custom settings from database
+      emailSettings = {
+        from: await db.getOption(organizationId, 'EMAIL_FROM').then(opt => opt ? opt.value : null).catch(() => null),
+        host: await db.getOption(organizationId, 'EMAIL_HOST').then(opt => opt ? opt.value : null).catch(() => null),
+        port: await db.getOption(organizationId, 'EMAIL_PORT').then(opt => opt ? opt.value : null).catch(() => null),
+        secure: await db.getOption(organizationId, 'EMAIL_SECURE').then(opt => opt ? opt.value : 'false').catch(() => 'false'),
+        user: await db.getOption(organizationId, 'EMAIL_USER').then(opt => opt ? opt.value : null).catch(() => null),
+        pass: await db.getOption(organizationId, 'EMAIL_PASS').then(opt => opt ? Encryption.decrypt(opt.value) : null).catch(() => null)
+      };
+
+      // Use environment variables as fallback if not set in database
+      emailSettings.from = emailSettings.from || process.env.EMAIL_FROM || process.env.EMAIL_USER || '';
+      emailSettings.host = emailSettings.host || process.env.EMAIL_HOST || 'smtp.gmail.com';
+      emailSettings.port = emailSettings.port || process.env.EMAIL_PORT || 587;
+      emailSettings.secure = emailSettings.secure === 'true' || process.env.EMAIL_SECURE === 'true';
+      emailSettings.user = emailSettings.user || process.env.EMAIL_USER || '';
+      emailSettings.pass = emailSettings.pass || process.env.EMAIL_PASS || '';
+
+      // Log masked config
+      logEmailConfig(`CUSTOM(org:${organizationId})`, emailSettings);
     } else {
-      res.status(404).json({ error: 'Option not found' });
+      // Use environment variables directly
+      emailSettings = {
+        from: process.env.EMAIL_FROM || process.env.EMAIL_USER || '',
+        host: process.env.EMAIL_HOST || 'smtp.gmail.com',
+        port: process.env.EMAIL_PORT || 587,
+        secure: process.env.EMAIL_SECURE === 'true',
+        user: process.env.EMAIL_USER || '',
+        pass: process.env.EMAIL_PASS || ''
+      };
+
+      // Log masked config
+      logEmailConfig('ENV(fallback)', emailSettings);
+    }
+
+    if (!emailSettings.host || !emailSettings.user || !emailSettings.pass) {
+      console.log('⚠️  Incomplete email settings; transporter will not be created.');
+      return null;
+    }
+
+    return nodemailer.createTransport({
+      host: emailSettings.host,
+      port: parseInt(emailSettings.port),
+      secure: emailSettings.secure,
+      auth: {
+        user: emailSettings.user,
+        pass: emailSettings.pass
+      }
+    });
+  } catch (error) {
+    console.error('Error creating transporter from settings:', error);
+    return null;
+  }
+}
+
+// Helper function to update the global email transporter
+async function updateEmailTransporter(organizationId) {
+  try {
+    const newTransporter = await createTransporterFromSettings(organizationId);
+    if (newTransporter) {
+      // Replace the global transporter with the new one
+      emailTransporter = newTransporter;
+      console.log('✅ Email transporter updated with new settings');
+
+      // Verify the new connection
+      emailTransporter.verify((error, success) => {
+        if (error) {
+          console.log('⚠️  Email transporter verification failed after update:', error.message);
+        } else {
+          console.log('✅ Email transporter verified successfully');
+        }
+      });
     }
   } catch (error) {
-    console.error('Error deleting option:', error);
-    res.status(500).json({ error: 'Failed to delete option' });
+    console.error('Error updating email transporter:', error);
   }
+}
+
+// CSRF error handler
+app.use((err, req, res, next) => {
+  if (err.code === 'EBADCSRFTOKEN') {
+    console.warn('⚠️  CSRF token validation failed');
+    if (req.accepts('json')) {
+      return res.status(403).json({ error: 'Invalid CSRF token' });
+    }
+    return res.status(403).send('Invalid CSRF token');
+  }
+  next(err);
 });
 
 // Start the server

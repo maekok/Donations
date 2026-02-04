@@ -1,7 +1,10 @@
 /.git
 /node_modules
-/data/data.db
+/data
 .dockerignore
 .env
 Dockerfile
 fly.toml
+/public/test-csrf.html
+/public/test-sql-injection.html
+/public/test.xss.html

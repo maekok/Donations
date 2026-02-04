@@ -2,6 +2,52 @@ const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const Encryption = require('./encryption');
 
+// SQL Injection Protection: Validate and sanitize database inputs
+function validateSQLInput(input, fieldName = 'input') {
+  if (input === null || input === undefined) {
+    return input;
+  }
+  
+  if (typeof input === 'string') {
+    // Check for SQL injection patterns
+    const sqlInjectionPatterns = [
+      /(\b(SELECT|INSERT|UPDATE|DELETE|DROP|CREATE|ALTER|EXEC|EXECUTE|UNION|SCRIPT)\b)/i,
+      /('|(\\')|(;)|(--)|(\/\*)|(\*\/)|(\+)|(\%27)|(\%22))/i,
+      /(\bOR\b.*=.*)|(\bAND\b.*=.*)/i,
+      /(\bUNION\b.*\bSELECT\b)/i
+    ];
+    
+    const hasSQLInjection = sqlInjectionPatterns.some(pattern => pattern.test(input));
+    if (hasSQLInjection) {
+      console.warn(`⚠️  Potential SQL injection detected in ${fieldName}:`, input.substring(0, 100));
+      // Parameterized queries should still protect, but log the attempt
+    }
+    
+    // Return as-is - parameterized queries will handle escaping
+    return input;
+  }
+  
+  return input;
+}
+
+// SQL Injection Protection: Validate SQL identifier (table/column names)
+function validateSQLIdentifier(identifier, fieldName = 'identifier') {
+  if (typeof identifier !== 'string') {
+    throw new Error(`Invalid ${fieldName}: must be a string`);
+  }
+  
+  // Only allow alphanumeric, underscore, and must start with letter or underscore
+  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(identifier)) {
+    throw new Error(`Invalid ${fieldName}: contains invalid characters`);
+  }
+  
+  if (identifier.length > 64) {
+    throw new Error(`Invalid ${fieldName}: too long (max 64 characters)`);
+  }
+  
+  return identifier;
+}
+
 // Database file path
 const dbPath = path.join(__dirname, 'data', 'data.db');
 
@@ -152,6 +198,19 @@ function initDatabase() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (organizationId) REFERENCES organizations (id),
       UNIQUE(organizationId, key)
+    )
+  `;
+
+  // Beta invite codes: one-time use codes that bind to a QuickBooks realm after OAuth
+  const createBetaInviteCodesTableSQL = `
+    CREATE TABLE IF NOT EXISTS beta_invite_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL UNIQUE,
+      realm_id TEXT,
+      used_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      login_count INTEGER DEFAULT 0,
+      last_login_at DATETIME
     )
   `;
 
@@ -308,6 +367,22 @@ function initDatabase() {
                               console.log('✅ Options table created or already exists');
                             }
                           });
+
+                          // Create beta invite codes table
+                          db.run(createBetaInviteCodesTableSQL, (err) => {
+                            if (err) {
+                              console.error('Error creating beta_invite_codes table:', err.message);
+                            } else {
+                              console.log('✅ Beta invite codes table created or already exists');
+                            }
+                            // Migration: add login_count and last_login_at if missing (existing DBs)
+                            db.run('ALTER TABLE beta_invite_codes ADD COLUMN login_count INTEGER DEFAULT 0', (e) => {
+                              if (e && !e.message.includes('duplicate column name')) console.error('Beta login_count migration:', e.message);
+                            });
+                            db.run('ALTER TABLE beta_invite_codes ADD COLUMN last_login_at DATETIME', (e) => {
+                              if (e && !e.message.includes('duplicate column name')) console.error('Beta last_login_at migration:', e.message);
+                            });
+                          });
                         }
                       });
                     }
@@ -459,15 +534,25 @@ function addQuickbooksTransaction(transactionData) {
 }
 
 // Check if transaction already exists
-function checkTransactionExists(qbDocNum) {
+function checkTransactionExists(qbDocNum, organizationId) {
   return new Promise((resolve, reject) => {
     if (!qbDocNum) {
       resolve(false); // If no doc_num, we can't check for duplicates
       return;
     }
     
-    const sql = 'SELECT COUNT(*) as count FROM transactions WHERE qb_docnum = ?';
-    db.get(sql, [qbDocNum], (err, row) => {
+    // Check for duplicate within the same organization
+    // If organizationId is provided, check both qb_docnum and organizationId
+    // If organizationId is null, only check qb_docnum (for backward compatibility)
+    let sql = 'SELECT COUNT(*) as count FROM transactions WHERE qb_docnum = ?';
+    const params = [qbDocNum];
+    
+    if (organizationId !== null && organizationId !== undefined) {
+      sql += ' AND organizationId = ?';
+      params.push(organizationId);
+    }
+    
+    db.get(sql, params, (err, row) => {
       if (err) {
         reject(err);
       } else {
@@ -492,11 +577,11 @@ function addQuickbooksTransactions(transactions) {
       const transaction = transactions[i];
       
       try {
-        // Check if transaction already exists
-        const exists = await checkTransactionExists(transaction.doc_num);
+        // Check if transaction already exists for this organization
+        const exists = await checkTransactionExists(transaction.doc_num, transaction.organizationId);
         
         if (exists) {
-          console.log(`⏭️  Skipping existing transaction: ${transaction.doc_num}`);
+          console.log(`⏭️  Skipping existing transaction: ${transaction.doc_num} (organizationId: ${transaction.organizationId})`);
           results.skipped++;
           continue;
         }
@@ -2065,8 +2150,13 @@ function deleteFeedback(id) {
 // Get option by organizationId and key
 function getOption(organizationId, key) {
   return new Promise((resolve, reject) => {
-    const sql = 'SELECT * FROM options WHERE organizationId = ? AND key = ?';
-    db.get(sql, [organizationId, key], (err, row) => {
+    const isGlobal = organizationId === null || typeof organizationId === 'undefined';
+    const sql = isGlobal
+      ? 'SELECT * FROM options WHERE organizationId IS NULL AND key = ?'
+      : 'SELECT * FROM options WHERE organizationId = ? AND key = ?';
+    const params = isGlobal ? [key] : [organizationId, key];
+    
+    db.get(sql, params, (err, row) => {
       if (err) {
         console.error('❌ Error getting option:', err);
         reject(err);
@@ -2080,8 +2170,13 @@ function getOption(organizationId, key) {
 // Get all options for an organization
 function getOptionsByOrganizationId(organizationId) {
   return new Promise((resolve, reject) => {
-    const sql = 'SELECT * FROM options WHERE organizationId = ?';
-    db.all(sql, [organizationId], (err, rows) => {
+    const isGlobal = organizationId === null || typeof organizationId === 'undefined';
+    const sql = isGlobal
+      ? 'SELECT * FROM options WHERE organizationId IS NULL ORDER BY key'
+      : 'SELECT * FROM options WHERE organizationId = ? ORDER BY key';
+    const params = isGlobal ? [] : [organizationId];
+
+    db.all(sql, params, (err, rows) => {
       if (err) {
         console.error('❌ Error getting options:', err);
         reject(err);
@@ -2092,34 +2187,64 @@ function getOptionsByOrganizationId(organizationId) {
   });
 }
 
+function deleteOption(organizationId, key) {
+  return new Promise((resolve, reject) => {
+    if (!key) {
+      return reject(new Error('Key is required to delete option'));
+    }
+
+    const isGlobal = organizationId === null || typeof organizationId === 'undefined';
+    const sql = isGlobal
+      ? 'DELETE FROM options WHERE organizationId IS NULL AND key = ?'
+      : 'DELETE FROM options WHERE organizationId = ? AND key = ?';
+    const params = isGlobal ? [key] : [organizationId, key];
+
+    db.run(sql, params, function(err) {
+      if (err) {
+        console.error('❌ Error deleting option:', err);
+        reject(err);
+      } else {
+        resolve(this.changes > 0);
+      }
+    });
+  });
+}
+
 // Set option (insert or update)
 function setOption(organizationId, key, value) {
   return new Promise((resolve, reject) => {
+    const normalizedOrgId = typeof organizationId === 'undefined' ? null : organizationId;
+    
     // First check if option exists
-    getOption(organizationId, key)
+    getOption(normalizedOrgId, key)
       .then(existingOption => {
         if (existingOption) {
           // Update existing option
-          const sql = 'UPDATE options SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE organizationId = ? AND key = ?';
-          db.run(sql, [value, organizationId, key], function(err) {
+          const isGlobal = normalizedOrgId === null;
+          const sql = isGlobal
+            ? 'UPDATE options SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE organizationId IS NULL AND key = ?'
+            : 'UPDATE options SET value = ?, updated_at = CURRENT_TIMESTAMP WHERE organizationId = ? AND key = ?';
+          const params = isGlobal ? [value, key] : [value, normalizedOrgId, key];
+          
+          db.run(sql, params, function(err) {
             if (err) {
               console.error('❌ Error updating option:', err);
               reject(err);
             } else {
-              console.log(`✅ Updated option: ${key} = ${value} for organization ${organizationId}`);
-              resolve({ organizationId, key, value });
+              console.log(`✅ Updated option: ${key} = ${value} for organization ${normalizedOrgId}`);
+              resolve({ organizationId: normalizedOrgId, key, value });
             }
           });
         } else {
           // Insert new option
           const sql = 'INSERT INTO options (organizationId, key, value) VALUES (?, ?, ?)';
-          db.run(sql, [organizationId, key, value], function(err) {
+          db.run(sql, [normalizedOrgId, key, value], function(err) {
             if (err) {
               console.error('❌ Error adding option:', err);
               reject(err);
             } else {
-              console.log(`✅ Added option: ${key} = ${value} for organization ${organizationId}`);
-              resolve({ id: this.lastID, organizationId, key, value });
+              console.log(`✅ Added option: ${key} = ${value} for organization ${normalizedOrgId}`);
+              resolve({ id: this.lastID, organizationId: normalizedOrgId, key, value });
             }
           });
         }
@@ -2131,9 +2256,13 @@ function setOption(organizationId, key, value) {
 // Delete option
 function deleteOption(organizationId, key) {
   return new Promise((resolve, reject) => {
-    const sql = 'DELETE FROM options WHERE organizationId = ? AND key = ?';
+    const isGlobal = organizationId === null || typeof organizationId === 'undefined';
+    const sql = isGlobal
+      ? 'DELETE FROM options WHERE organizationId IS NULL AND key = ?'
+      : 'DELETE FROM options WHERE organizationId = ? AND key = ?';
+    const params = isGlobal ? [key] : [organizationId, key];
     
-    db.run(sql, [organizationId, key], function(err) {
+    db.run(sql, params, function(err) {
       if (err) {
         reject(err);
       } else {
@@ -2145,6 +2274,97 @@ function deleteOption(organizationId, key) {
         }
       }
     });
+  });
+}
+
+// ===== Beta invite codes =====
+function getBetaInviteCodeByCode(code) {
+  return new Promise((resolve, reject) => {
+    const c = validateSQLInput(code, 'code');
+    if (c === null || c === undefined || String(c).trim() === '') {
+      return resolve(null);
+    }
+    db.get('SELECT id, code, realm_id, used_at, created_at, login_count, last_login_at FROM beta_invite_codes WHERE code = ?', [String(c).trim()], (err, row) => {
+      if (err) reject(err);
+      else resolve(row || null);
+    });
+  });
+}
+
+function useBetaInviteCode(code, realmId) {
+  return new Promise((resolve, reject) => {
+    const c = validateSQLInput(code, 'code');
+    const r = validateSQLInput(realmId, 'realmId');
+    if (!c || String(c).trim() === '' || !r || String(r).trim() === '') {
+      return reject(new Error('code and realmId are required'));
+    }
+    db.run(
+      'UPDATE beta_invite_codes SET realm_id = ?, used_at = CURRENT_TIMESTAMP WHERE code = ? AND used_at IS NULL',
+      [String(r).trim(), String(c).trim()],
+      function(err) {
+        if (err) reject(err);
+        else if (this.changes === 0) resolve({ used: false });
+        else resolve({ used: true });
+      }
+    );
+  });
+}
+
+function isRealmAllowed(realmId) {
+  return new Promise((resolve, reject) => {
+    const r = validateSQLInput(realmId, 'realmId');
+    if (!r || String(r).trim() === '') return resolve(false);
+    db.get(
+      'SELECT 1 FROM beta_invite_codes WHERE realm_id = ? AND used_at IS NOT NULL',
+      [String(r).trim()],
+      (err, row) => {
+        if (err) reject(err);
+        else resolve(!!row);
+      }
+    );
+  });
+}
+
+function createBetaInviteCode(code) {
+  return new Promise((resolve, reject) => {
+    const c = validateSQLInput(code, 'code');
+    if (!c || String(c).trim() === '') {
+      return reject(new Error('code is required'));
+    }
+    db.run(
+      'INSERT INTO beta_invite_codes (code) VALUES (?)',
+      [String(c).trim()],
+      function(err) {
+        if (err) {
+          if (err.message && err.message.includes('UNIQUE')) reject(new Error('Code already exists'));
+          else reject(err);
+        } else resolve({ id: this.lastID, code: String(c).trim() });
+      }
+    );
+  });
+}
+
+function getAllBetaInviteCodes() {
+  return new Promise((resolve, reject) => {
+    db.all('SELECT id, code, realm_id, used_at, created_at, login_count, last_login_at FROM beta_invite_codes ORDER BY created_at DESC', [], (err, rows) => {
+      if (err) reject(err);
+      else resolve(rows || []);
+    });
+  });
+}
+
+function incrementBetaLoginCount(realmId) {
+  return new Promise((resolve, reject) => {
+    const r = validateSQLInput(realmId, 'realmId');
+    if (!r || String(r).trim() === '') return resolve();
+    db.run(
+      'UPDATE beta_invite_codes SET login_count = COALESCE(login_count, 0) + 1, last_login_at = CURRENT_TIMESTAMP WHERE realm_id = ?',
+      [String(r).trim()],
+      function(err) {
+        if (err) reject(err);
+        else resolve({ updated: this.changes });
+      }
+    );
   });
 }
 
@@ -2222,7 +2442,16 @@ module.exports = {
   deleteFeedback,
   getOption,
   getOptionsByOrganizationId,
+  deleteOption,
   setOption,
   deleteOption,
-  closeDatabase
+  validateSQLInput,
+  validateSQLIdentifier,
+  closeDatabase,
+  getBetaInviteCodeByCode,
+  useBetaInviteCode,
+  isRealmAllowed,
+  createBetaInviteCode,
+  getAllBetaInviteCodes,
+  incrementBetaLoginCount
 };

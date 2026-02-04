@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Donation List</title>
+  <meta name="csrf-token" content="<%= csrfToken || '' %>">
   <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.0/css/all.min.css" rel="stylesheet">
   <link rel="stylesheet" href="/css/style.css">
 </head>
@@ -25,14 +26,22 @@
                 <i class="fas fa-image"></i>
                 Logo
               </a>
+              <a href="#" onclick="openEmailSettingsDialog()">
+                <i class="fas fa-envelope"></i>
+                Email
+              </a>
             <% } else { %>
-              <a href="#" class="disabled" title="Please connect to QuickBooks first" onclick="openOrganizationDialog()">
+              <a href="#" class="disabled" title="Please connect to QuickBooks first" onclick="event.preventDefault(); event.stopPropagation(); return false;">
                 <i class="fas fa-building"></i>
                 Organization
               </a>
-              <a href="#" class="disabled" title="Please connect to QuickBooks first" onclick="openLogoDialog()">
+              <a href="#" class="disabled" title="Please connect to QuickBooks first" onclick="event.preventDefault(); event.stopPropagation(); return false;">
                 <i class="fas fa-image"></i>
                 Logo
+              </a>
+              <a href="#" class="disabled" title="Please connect to QuickBooks first" onclick="event.preventDefault(); event.stopPropagation(); return false;">
+                <i class="fas fa-envelope"></i>
+                Email
               </a>
             <% } %>
             <a href="#" onclick="openFeedbackDialog()">
@@ -41,31 +50,53 @@
             </a>
           </div>
         </div>
-        <h1>Donation List</h1>
+        <h1>Donation List<span class="beta-badge">Beta</span></h1>
       </div>
       <div class="header-right">
-        <button class="sync-button" onclick="syncWithQuickbooks()">
-          <i class="fas fa-sync-alt"></i>
-          Sync with Quickbooks
-        </button>
         <% if (isLoggedInToQuickbooks) { %>
-          <button class="logout-button" onclick="logoutFromQuickbooks()" style="background-color: #dc3545; margin-left: 10px;">
-            <i class="fas fa-sign-out-alt"></i>
-            Logout
+          <button class="qb-refresh-btn" onclick="refreshQuickbooksData()" aria-label="Refresh QuickBooks Data">
+            <i class="fas fa-sync-alt" aria-hidden="true"></i>
+            <span>Refresh QuickBooks Data</span>
+          </button>
+          <button class="qb-connect-btn qb-connect-btn--disconnect" onclick="logoutFromQuickbooks()" aria-label="Disconnect from QuickBooks">
+            <i class="fas fa-unlink" aria-hidden="true"></i>
+            <span>Disconnect from QuickBooks</span>
+          </button>
+        <% } else { %>
+          <button class="qb-connect-btn" onclick="syncWithQuickbooks()" aria-label="Connect to QuickBooks">
+            <span class="sr-only">Connect to QuickBooks</span>
           </button>
         <% } %>
       </div>
     </div>
-    <table>
-      <caption>
-        <div class="table-header">
-          <h2>Donations</h2>
-          <div class="search-container">
-            <input type="text" id="tableSearch" placeholder="Search donations..." class="search-input" onkeyup="filterTable()">
-            <div class="search-suggestions" id="searchSuggestions"></div>
-          </div>
+    <% if (!isLoggedInToQuickbooks && typeof betaRequireCode !== 'undefined' && betaRequireCode) { %>
+    <div class="beta-code-section" id="betaCodeSection">
+      <div class="beta-code-card">
+        <h3><i class="fas fa-ticket-alt"></i> Beta access</h3>
+        <p class="beta-code-intro">Enter your invite code to use this app. Then connect to QuickBooks above.</p>
+        <p class="beta-code-error <%= (typeof betaError === 'undefined' || !betaError) ? 'beta-code-hidden' : '' %>" id="betaCodeError">
+          <% if (typeof betaError !== 'undefined' && betaError === 'invalid_code') { %>Invalid or already-used invite code. Please try again or request a new code.<% } %>
+          <% if (typeof betaError !== 'undefined' && betaError === 'code_required') { %>Please enter your invite code below, then connect to QuickBooks.<% } %>
+        </p>
+        <p class="beta-code-success beta-code-hidden" id="betaCodeSuccess">Invite code accepted. You can now connect to QuickBooks.</p>
+        <div class="beta-code-form">
+          <input type="text" id="betaInviteCode" placeholder="Enter invite code" class="beta-code-input" autocomplete="off">
+          <button type="button" class="btn btn-primary" id="betaCodeSubmit" onclick="submitBetaCode()">Submit</button>
         </div>
-      </caption>
+      </div>
+    </div>
+    <% } %>
+    <div class="table-wrapper">
+      <table>
+        <caption>
+          <div class="table-header">
+            <h2>Donations</h2>
+            <div class="search-container">
+              <input type="text" id="tableSearch" placeholder="Search donations..." class="search-input" onkeyup="filterTable()">
+              <div class="search-suggestions" id="searchSuggestions"></div>
+            </div>
+          </div>
+        </caption>
      
       <thead>
         <tr>
@@ -138,6 +169,7 @@
         <% }); %>
       </tbody>
     </table>
+    </div>
   </div>
 
   <!-- PDF Viewer Modal -->
@@ -294,6 +326,93 @@
     </div>
   </div>
 
+  <!-- Email Configuration Modal -->
+  <div id="emailSettingsModal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Email Configuration</h2>
+        <span class="close" onclick="closeEmailSettingsModal()">&times;</span>
+      </div>
+      <div class="modal-body">
+        <form id="emailForm">
+          <div class="form-group" style="margin-bottom: 20px; padding: 15px; background: #f8f9fa; border-radius: 5px;">
+            <label style="display: flex; align-items: center; cursor: pointer; margin: 0;">
+              <input type="checkbox" id="useCustomEmail" name="useCustomEmail" onchange="toggleEmailFields()" style="margin: 0; margin-right: 8px; cursor: pointer; width: 18px; height: 18px; flex-shrink: 0;">
+              <span style="font-weight: 100;">Use custom email address</span>
+            </label>
+          </div>
+          
+          <div id="emailFieldsContainer" style="display: none;">
+          <div class="form-group">
+            <label for="emailFrom">From Email Address *</label>
+            <input type="email" id="emailFrom" name="from" required placeholder="donations@yourorganization.org">
+            <small style="color: #666; font-size: 12px; margin-top: 5px; display: block;">This is the email address that will appear as the sender</small>
+          </div>
+          
+          <div class="form-row-2">
+            <div class="form-group" style="margin-right: 40px;">
+              <label for="emailHost">SMTP Host *</label>
+              <input type="text" id="emailHost" name="host" required placeholder="smtp.gmail.com">
+            </div>
+            <div class="form-group" style="flex: 0 0 auto; max-width: 200px;">
+              <label for="emailPort">SMTP Port *</label>
+              <input type="number" id="emailPort" name="port" required placeholder="587" min="1" max="65535" style="width: 100px;">
+              <small style="color: #666; font-size: 12px; margin-top: 5px; display: block;">Common: 587 (TLS) or 465 (SSL)</small>
+            </div>
+          </div>
+          
+          <div class="form-group">
+            <label style="display: flex; align-items: center; cursor: pointer; margin: 0;">
+              <span style="margin-right: 8px; font-weight: 500;">Use secure connection (SSL/TLS)</span>
+              <input type="checkbox" id="emailSecure" name="secure" style="margin: 0; cursor: pointer; width: 18px; height: 18px; flex-shrink: 0;">
+            </label>
+            <small style="color: #666; font-size: 12px; margin-top: 5px; display: block; margin-left: 0;">Check if using port 465 (SSL), uncheck for port 587 (TLS)</small>
+          </div>
+          
+          <div class="form-row-2">
+            <div class="form-group" style="margin-right: 40px;">
+              <label for="emailUser">SMTP Username *</label>
+              <input type="text" id="emailUser" name="user" required placeholder="your-email@example.com">
+            </div>
+            <div class="form-group" style="flex: 0 0 auto; max-width: 300px;">
+              <label for="emailPass">SMTP Password *</label>
+              <input type="password" id="emailPass" name="pass" required placeholder="Enter password" style="max-width: 250px;">
+              <small style="color: #666; font-size: 12px; margin-top: 5px; display: block;">For Gmail, use an App Password instead of your regular password</small>
+            </div>
+          </div>
+          
+          <div class="form-group" style="margin-top: 20px; padding: 15px; background: #f8f9fa; border-radius: 5px;">
+            <h3 style="margin-top: 0; font-size: 16px; color: #333;">Common SMTP Settings:</h3>
+            <div style="font-size: 13px; color: #666; line-height: 1.8;">
+              <strong>Gmail:</strong> smtp.gmail.com, Port 587, Secure: Off<br>
+              <strong>Outlook/Hotmail:</strong> smtp-mail.outlook.com, Port 587, Secure: Off<br>
+              <strong>Yahoo:</strong> smtp.mail.yahoo.com, Port 587, Secure: Off<br>
+              <strong>Custom Server:</strong> Check with your email provider
+            </div>
+          </div>
+          </div>
+          
+          <div id="defaultEmailInfo" style="display: none; margin-top: 20px; padding: 15px; background: #e7f3ff; border-radius: 5px; border-left: 4px solid #2196F3;">
+            <h3 style="margin-top: 0; font-size: 16px; color: #333;">
+              <i class="fas fa-info-circle"></i> Using Default Email Settings
+            </h3>
+            <div style="font-size: 13px; color: #666; line-height: 1.8;">
+              The system is using email settings from environment variables.<br>
+              Check "Use custom email address" above to configure custom settings.
+            </div>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeEmailSettingsModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="saveEmailSettings()">Save Settings</button>
+        <button class="btn btn-info" onclick="testEmailConnection()" style="margin-left: 10px;">
+          <i class="fas fa-check-circle"></i> Test Connection
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Welcome Dialog -->
   <div id="welcomeModal" class="modal">
     <div class="modal-content welcome-modal-content">
@@ -360,10 +479,10 @@
         <div class="terms-content">
           <h3>Reznim Donation Receipt App &ndash; Terms of Service</h3>
 
-          <p class="terms-note"><em>To continue using the app, close this dialog after review and choose "Accept All" on the cookie banner below.</em></p>
+          <p class="terms-note"><em>Close this dialog when you have finished reading.</em></p>
 
           <h4>1. Overview</h4>
-          <p>Welcome to Donation Receipt App (&ldquo;the App,&rdquo; &ldquo;we,&rdquo; &ldquo;us,&rdquo; or &ldquo;our&rdquo;). Donation Receipt App allows businesses to connect their QuickBooks Online accounts to generate donation receipts, including donor and sales receipt information. By accessing or using the App, you agree to these Terms of Service (&ldquo;Terms&rdquo;). If you do not agree, please do not use the App.</p>
+          <p>Welcome to Donation Receipt App (&ldquo;the App,&rdquo; &ldquo;we,&rdquo; &ldquo;us,&rdquo; or &ldquo;our&rdquo;). Donation Receipt App allows businesses to connect their QuickBooks Online accounts to generate donation receipts, including donor and sales receipt information. By connecting to QuickBooks, you accept the Terms of Service. By accessing or using the App, you agree to these Terms of Service (&ldquo;Terms&rdquo;). If you do not agree, please do not use the App.</p>
 
           <h4>2. Eligibility and Business Use</h4>
           <p>Donation Generator is intended for business use only. By using the App, you represent that you are authorized to act on behalf of your organization and to bind it to these Terms.</p>
@@ -490,7 +609,7 @@
 
   <!-- Email Receipt Modal -->
   <div id="emailModal" class="modal">
-    <div class="modal-content">
+    <div class="modal-content" style="max-width: 600px;">
       <div class="modal-header">
         <h2>Email Receipt</h2>
         <span class="close" onclick="closeEmailModal()">&times;</span>
@@ -502,11 +621,12 @@
         </div>
         <div class="form-group">
           <label for="emailSubject">Subject:</label>
-          <input type="text" id="emailSubject" value="Your Donation Receipt">
+          <input type="text" id="emailSubject" value="Your Donation Receipt" style="max-width: 420px;">
         </div>
         <div class="form-group">
           <label for="emailMessage">Message:</label>
-          <textarea id="emailMessage" rows="4" placeholder="Optional personal message..."></textarea>
+          <textarea id="emailMessage" rows="6" placeholder="Thank you for your generous donation to your organization." style="max-width: 520px; width: 100%;"></textarea>
+          <small style="color:#666; display:block; margin-top:6px;">You can edit this message before sending.</small>
         </div>
       </div>
       <div class="modal-footer">
@@ -536,7 +656,7 @@
 
   <footer class="page-footer">
     <p>
-      &copy; 2025 Reznim, LLC
+      &copy; 2026 Reznim, LLC
       <span class="footer-separator">|</span>
       <a href="#" data-open-modal="terms">Terms of Service</a>
       <span class="footer-separator">|</span>
@@ -544,26 +664,12 @@
     </p>
   </footer>
 
-  <!-- Cookie Consent Banner -->
-  <div id="cookieBanner" class="cookie-banner" style="display: none;">
-    <div class="cookie-banner-content">
-      <p class="cookie-banner-text">
-        We use cookies to enhance your user experience. By using our website and services, you consent to our 
-        <a href="#" data-open-modal="terms" style="color: #007bff; text-decoration: underline;">Terms of Service</a> 
-        and <a href="#" data-open-modal="privacy" style="color: #007bff; text-decoration: underline;">Privacy Policy</a>.
-      </p>
-      <div class="cookie-banner-buttons">
-        <button class="btn btn-secondary" onclick="rejectAllCookies()">Reject All</button>
-        <button class="btn btn-primary" onclick="acceptAllCookies()">Accept All</button>
-      </div>
-    </div>
-  </div>
-
   <div id="app-data" data-logged-in="<%- isLoggedInToQuickbooks ? 'true' : 'false' %>" style="display: none;"></div>
   <script>
     // Make server-side variables available to JavaScript
     var isLoggedInToQuickbooks = document.getElementById('app-data').getAttribute('data-logged-in') === 'true';
   </script>
+  <script src="/js/csrf.js"></script>
   <script src="/js/script.js"></script>
 </body>
 </html> 

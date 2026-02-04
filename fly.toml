@@ -10,13 +10,26 @@ primary_region = 'sjc'
 
 [http_service]
   internal_port = 3000
-  force_https = false
+  force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
   min_machines_running = 0
+
+[[mounts]]
+source = "myapp_data"
+destination = "/app/data"  
   
 [env]
-  QUICKBOOKS_REDIRECT_URI='http://donations.fly.dev/auth/quickbooks/callback'
+  QUICKBOOKS_REDIRECT_URI='https://www.reznim.com/auth/quickbooks/callback'
+  QUICKBOOKS_CLIENT_ID_PRODUCTION='ABAH7KTR0pX8DB7PhEe2PWSw5Vev7ST0YsQHmiDygFE36hXEaQ'
+  QUICKBOOKS_CLIENT_SECRET_PRODUCTION='wQvN9mbfc79CHFzlk5Lr1Mt1ShMcJsCbCuSbwVwN'
+  QUICKBOOKS_ENVIRONMENT='production'
+
+  EMAIL_HOST='smtp.office365.com'
+  EMAIL_PORT='587'
+  EMAIL_SECURE='false'
+  EMAIL_USER='support@reznim.com'
+  EMAIL_PASS='lcvpsnfsrbqzfydc'
 
 [[vm]]
   memory = '512mb'

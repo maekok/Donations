@@ -278,6 +278,7 @@ window.onclick = function(event) {
   const pdfModal = document.getElementById('pdfModal');
   const orgModal = document.getElementById('organizationModal');
   const logoModal = document.getElementById('logoModal');
+  const emailModal = document.getElementById('emailModal');
   
   if (event.target === pdfModal) {
     closePdfModal();
@@ -287,6 +288,9 @@ window.onclick = function(event) {
   }
   if (event.target === logoModal) {
     closeLogoModal();
+  }
+  if (event.target === emailModal) {
+    closeEmailModal();
   }
 }
 
@@ -374,13 +378,23 @@ async function loadLogoData() {
       // No logo found - show default state
       console.log('📋 No logo found for organization - showing default state');
       showNoLogoState();
+    } else if (response.status === 400 || response.status === 401) {
+      // Authentication or connection issue
+      const errorData = await response.json().catch(() => ({ error: 'Authentication required' }));
+      console.log('⚠️ Logo loading issue:', errorData.error);
+      showNoLogoState();
+      // Don't show error notification for expected states (no connection, no logo)
     } else {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}: ${response.statusText}` }));
+      throw new Error(errorData.error || `HTTP ${response.status}: ${response.statusText}`);
     }
   } catch (error) {
     console.error('❌ Error loading logo data:', error);
     showNoLogoState();
-    showNotification('Failed to load logo data. Please try again.', 'error');
+    // Only show error notification for unexpected errors
+    if (!error.message.includes('404') && !error.message.includes('400') && !error.message.includes('401')) {
+      showNotification('Failed to load logo data. Please try again.', 'error');
+    }
   }
 }
 
@@ -686,6 +700,316 @@ async function deleteLogo() {
   }
 }
 
+// Email Configuration Modal Functions
+function openEmailSettingsDialog() {
+  // Check if user is logged into QuickBooks
+  if (!isLoggedInToQuickbooks) {
+    showNotification('Please connect to QuickBooks first to manage email settings.', 'warning');
+    return;
+  }
+  
+  // Close dropdown menu
+  const dropdownMenu = document.getElementById('dropdownMenu');
+  if (dropdownMenu) {
+    dropdownMenu.classList.remove('show');
+  }
+  
+  // Initialize checkbox to unchecked state first (hide fields initially)
+  const checkbox = document.getElementById('useCustomEmail');
+  if (checkbox) {
+    checkbox.checked = false;
+  }
+  // Hide fields initially before loading settings
+  toggleEmailFields();
+  
+  // Load email settings (this will update checkbox and fields if custom is enabled)
+  loadEmailSettings();
+  
+  // Show modal
+  const modal = document.getElementById('emailSettingsModal');
+  if (modal) {
+    modal.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+  }
+}
+
+function closeEmailSettingsModal() {
+  const modal = document.getElementById('emailSettingsModal');
+  if (modal) {
+    modal.style.display = 'none';
+    document.body.style.overflow = 'auto';
+  }
+  
+  // Reset form
+  const form = document.getElementById('emailForm');
+  if (form) {
+    form.reset();
+  }
+}
+
+function toggleEmailFields() {
+  const checkbox = document.getElementById('useCustomEmail');
+  const fieldsContainer = document.getElementById('emailFieldsContainer');
+  const defaultInfo = document.getElementById('defaultEmailInfo');
+  
+  if (!checkbox || !fieldsContainer || !defaultInfo) {
+    console.warn('Email form elements not found');
+    return;
+  }
+  
+  const useCustom = checkbox.checked;
+  
+  if (useCustom) {
+    // Show custom fields
+    fieldsContainer.style.display = 'block';
+    defaultInfo.style.display = 'none';
+    
+    // Enable all fields
+    const fields = fieldsContainer.querySelectorAll('input, select');
+    fields.forEach(field => {
+      field.disabled = false;
+      field.required = true;
+    });
+  } else {
+    // Hide custom fields
+    fieldsContainer.style.display = 'none';
+    defaultInfo.style.display = 'block';
+    
+    // Disable all fields
+    const fields = fieldsContainer.querySelectorAll('input, select');
+    fields.forEach(field => {
+      field.disabled = true;
+      field.required = false;
+    });
+  }
+}
+
+async function loadEmailSettings() {
+  try {
+    console.log('🔍 Loading email settings...');
+    const response = await fetch('/api/email/settings');
+    
+    if (!response.ok) {
+      const error = await response.json();
+      console.error('❌ Error loading email settings:', error);
+      showNotification(error.error || 'Failed to load email settings', 'error');
+      return;
+    }
+    
+    const settings = await response.json();
+    console.log('📊 Email settings received:', { ...settings, hasPassword: settings.hasPassword });
+    
+    // Check if custom email is enabled (default to false if not set)
+    const useCustom = settings.useCustom === 'true' || settings.useCustom === true;
+    const checkbox = document.getElementById('useCustomEmail');
+    if (checkbox) {
+      checkbox.checked = useCustom;
+    }
+    
+    // Toggle fields based on checkbox state (this will hide/show appropriately)
+    toggleEmailFields();
+    
+    // Populate form fields (only if custom is enabled)
+    if (useCustom) {
+      document.getElementById('emailFrom').value = settings.from || '';
+      document.getElementById('emailHost').value = settings.host || '';
+      document.getElementById('emailPort').value = settings.port || '';
+      document.getElementById('emailSecure').checked = settings.secure === 'true';
+      document.getElementById('emailUser').value = settings.user || '';
+      
+      // Don't populate password field - user needs to re-enter if changing
+      // Only clear it if password is not set
+      if (!settings.hasPassword) {
+        document.getElementById('emailPass').value = '';
+      }
+    }
+    
+    console.log('✅ Email settings loaded successfully');
+  } catch (error) {
+    console.error('❌ Error loading email settings:', error);
+    showNotification('Failed to load email settings. Please try again.', 'error');
+  }
+}
+
+async function saveEmailSettings() {
+  try {
+    const form = document.getElementById('emailForm');
+    if (!form) {
+      showNotification('Email form not found', 'error');
+      return;
+    }
+    
+    const useCustom = document.getElementById('useCustomEmail').checked;
+    
+    const formData = {
+      useCustom: useCustom,
+      from: useCustom ? document.getElementById('emailFrom').value.trim() : '',
+      host: useCustom ? document.getElementById('emailHost').value.trim() : '',
+      port: useCustom ? document.getElementById('emailPort').value.trim() : '',
+      secure: useCustom ? document.getElementById('emailSecure').checked : false,
+      user: useCustom ? document.getElementById('emailUser').value.trim() : '',
+      pass: useCustom ? document.getElementById('emailPass').value.trim() : '' // Only sent if user enters/changes password
+    };
+    
+    // Validate required fields only if custom email is enabled
+    if (useCustom) {
+      if (!formData.from || !formData.host || !formData.port || !formData.user) {
+        showNotification('Please fill in all required fields', 'error');
+        return;
+      }
+      
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(formData.from)) {
+        showNotification('Please enter a valid email address for "From" field', 'error');
+        return;
+      }
+      
+      // Validate port
+      const portNum = parseInt(formData.port);
+      if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+        showNotification('Port must be a number between 1 and 65535', 'error');
+        return;
+      }
+    }
+    
+    // Password is optional - only send if provided
+    // If not provided, the server will keep the existing password
+    
+    console.log('💾 Saving email settings...', { useCustom });
+    const response = await fetch('/api/email/settings', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(formData)
+    });
+    
+    const result = await response.json();
+    
+    if (response.ok) {
+      showNotification(useCustom ? 'Custom email settings saved successfully!' : 'Now using default email settings from environment variables', 'success');
+      closeEmailSettingsModal();
+    } else {
+      showNotification(result.error || 'Failed to save email settings', 'error');
+    }
+  } catch (error) {
+    console.error('❌ Error saving email settings:', error);
+    showNotification('Failed to save email settings. Please try again.', 'error');
+  }
+}
+
+async function testEmailConnection() {
+  try {
+    const form = document.getElementById('emailForm');
+    if (!form) {
+      showNotification('Email form not found', 'error');
+      return;
+    }
+    
+    const useCustom = document.getElementById('useCustomEmail').checked;
+    
+    if (!useCustom) {
+      showNotification('Please enable "Use custom email address" to test connection with custom settings', 'warning');
+      return;
+    }
+    
+    // Read values
+    const fromVal = (document.getElementById('emailFrom').value || '').trim();
+    const hostVal = (document.getElementById('emailHost').value || '').trim();
+    const portVal = (document.getElementById('emailPort').value || '').trim();
+    const userVal = (document.getElementById('emailUser').value || '').trim();
+    const passVal = (document.getElementById('emailPass').value || '').trim();
+    const secureVal = document.getElementById('emailSecure').checked;
+    
+    // Debug log current values (without password)
+    console.log('🧪 Testing email with values:', { fromVal, hostVal, portVal, userVal, secureVal });
+    
+    // Validate required fields (password optional)
+    if (!fromVal) {
+      showNotification('From email is required', 'error');
+      document.getElementById('emailFrom').focus();
+      return;
+    }
+    if (!hostVal) {
+      showNotification('SMTP host is required', 'error');
+      document.getElementById('emailHost').focus();
+      return;
+    }
+    if (!portVal) {
+      showNotification('SMTP port is required', 'error');
+      document.getElementById('emailPort').focus();
+      return;
+    }
+    if (!userVal) {
+      showNotification('SMTP username is required', 'error');
+      document.getElementById('emailUser').focus();
+      return;
+    }
+    
+    // Validate email format
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(fromVal)) {
+      showNotification('Please enter a valid From email address', 'error');
+      document.getElementById('emailFrom').focus();
+      return;
+    }
+    
+    // Validate port range
+    const portNum = parseInt(portVal, 10);
+    if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
+      showNotification('Port must be a number between 1 and 65535', 'error');
+      document.getElementById('emailPort').focus();
+      return;
+    }
+    
+    // Save settings first (password optional)
+    console.log('💾 Saving email settings before test...');
+    const saveResponse = await fetch('/api/email/settings', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        useCustom: true,
+        from: fromVal,
+        host: hostVal,
+        port: portVal,
+        secure: secureVal,
+        user: userVal,
+        pass: passVal // optional; server keeps previous if empty
+      })
+    });
+    
+    if (!saveResponse.ok) {
+      const error = await saveResponse.json().catch(() => ({}));
+      showNotification(error.error || 'Failed to save settings', 'error');
+      return;
+    }
+    
+    // Test connection
+    console.log('🧪 Testing email connection...');
+    showNotification('Testing email connection...', 'info');
+    
+    const testResponse = await fetch('/api/email/test', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const testResult = await testResponse.json().catch(() => ({}));
+    
+    if (testResponse.ok && testResult.success) {
+      showNotification('✅ Email connection test successful!', 'success');
+    } else {
+      showNotification(`❌ Connection test failed: ${testResult.message || testResult.error || 'Unknown error'}`, 'error');
+    }
+  } catch (error) {
+    console.error('❌ Error testing email connection:', error);
+    showNotification('Failed to test email connection. Please try again.', 'error');
+  }
+}
 
 // Logout from QuickBooks
 function logoutFromQuickbooks() {
@@ -882,17 +1206,67 @@ async function generateReceipt(transactionId) {
   }
 }
 
+// Beta: submit invite code before connecting to QuickBooks
+async function submitBetaCode() {
+  const input = document.getElementById('betaInviteCode');
+  const submitBtn = document.getElementById('betaCodeSubmit');
+  const successEl = document.getElementById('betaCodeSuccess');
+  const errorEl = document.getElementById('betaCodeError');
+  const code = input && input.value ? input.value.trim() : '';
+  if (!code) {
+    if (successEl) successEl.classList.add('beta-code-hidden');
+    if (errorEl) { errorEl.textContent = 'Please enter your invite code.'; errorEl.classList.remove('beta-code-hidden'); }
+    return;
+  }
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Submitting…'; }
+  if (errorEl) errorEl.classList.add('beta-code-hidden');
+  if (successEl) successEl.classList.add('beta-code-hidden');
+  try {
+    const res = await fetch('/api/beta/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: code })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && data.ok) {
+      if (successEl) { successEl.classList.remove('beta-code-hidden'); successEl.textContent = data.message || 'Invite code accepted. You can now connect to QuickBooks.'; }
+      if (errorEl) errorEl.classList.add('beta-code-hidden');
+    } else {
+      if (errorEl) { errorEl.textContent = data.error || 'Invalid invite code.'; errorEl.classList.remove('beta-code-hidden'); }
+      if (successEl) successEl.classList.add('beta-code-hidden');
+    }
+  } catch (e) {
+    if (errorEl) { errorEl.textContent = 'Could not validate code. Please try again.'; errorEl.classList.remove('beta-code-hidden'); }
+    if (successEl) successEl.classList.add('beta-code-hidden');
+  }
+  if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Submit'; }
+}
+
 // Function to sync with Quickbooks
 async function syncWithQuickbooks() {
   console.log('Sync with Quickbooks button clicked');
   
-  const button = document.querySelector('.sync-button');
-  const originalText = button.innerHTML;
+  const button = document.querySelector('.qb-connect-btn');
+  const srText = button ? button.querySelector('.sr-only') : null;
+  const originalLabel = button ? (srText ? srText.textContent.trim() : button.getAttribute('aria-label') || 'Sync with QuickBooks') : 'Sync with QuickBooks';
+  
+  const setButtonState = (label, options = {}) => {
+    if (!button) return;
+    if (srText) {
+      srText.textContent = label;
+    }
+    button.setAttribute('aria-label', label);
+    button.disabled = !!options.disabled;
+    button.classList.remove('loading', 'success', 'error');
+    if (options.loading) button.classList.add('loading');
+    if (options.success) button.classList.add('success');
+    if (options.error) button.classList.add('error');
+  };
+  
+  const resetButtonState = () => setButtonState(originalLabel, { disabled: false });
   
   try {
-    // Show loading state
-    button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Connecting...';
-    button.disabled = true;
+    setButtonState('Connecting to QuickBooks', { loading: true, disabled: true });
     
     // Check Quickbooks connection status first
     const statusResponse = await fetch('/api/quickbooks/status');
@@ -900,8 +1274,7 @@ async function syncWithQuickbooks() {
     
     if (!status.isAuthenticated) {
       // Not connected: check Terms of Service option before redirecting
-      button.innerHTML = '<i class="fas fa-link"></i> Connect to Quickbooks';
-      button.disabled = false;
+      setButtonState('Connect to QuickBooks', { disabled: false });
 
       // First check localStorage for ToS agreement
       try {
@@ -980,8 +1353,7 @@ async function syncWithQuickbooks() {
       }
       
       // Show success message
-      button.innerHTML = '<i class="fas fa-check"></i> Connected!';
-      button.style.background = 'linear-gradient(135deg, #28a745 0%, #20c997 100%)';
+      setButtonState('Connected to QuickBooks', { success: true, disabled: true });
       
       // Show success notification with database results
       let notificationMessage = 'Successfully connected to Quickbooks and fetched transaction report!';
@@ -1005,16 +1377,125 @@ async function syncWithQuickbooks() {
     console.error('❌ Quickbooks connection error:', error);
     
     // Show error state
-    button.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Error';
-    button.style.background = 'linear-gradient(135deg, #dc3545 0%, #c82333 100%)';
+    setButtonState('Error connecting to QuickBooks', { error: true, disabled: false });
     
     showNotification(`Quickbooks connection failed: ${error.message}`, 'error');
     
     // Reset button after 3 seconds
     setTimeout(() => {
-      button.innerHTML = originalText;
-      button.disabled = false;
-      button.style.background = 'linear-gradient(135deg, #4CAF50 0%, #45a049 100%)';
+      resetButtonState();
+    }, 3000);
+  }
+}
+
+// Function to refresh QuickBooks data
+async function refreshQuickbooksData() {
+  console.log('Refresh QuickBooks data button clicked');
+  
+  const button = document.querySelector('.qb-refresh-btn');
+  if (!button) {
+    console.error('Refresh button not found');
+    return;
+  }
+  
+  const originalLabel = button.getAttribute('aria-label') || 'Refresh QuickBooks Data';
+  const originalHTML = button.innerHTML;
+  
+  const setButtonState = (label, options = {}) => {
+    button.setAttribute('aria-label', label);
+    button.disabled = !!options.disabled;
+    button.classList.remove('loading', 'success', 'error');
+    if (options.loading) {
+      button.classList.add('loading');
+      button.innerHTML = '<i class="fas fa-sync-alt fa-spin" aria-hidden="true"></i><span>Refreshing...</span>';
+    } else if (options.success) {
+      button.classList.add('success');
+      button.innerHTML = '<i class="fas fa-check" aria-hidden="true"></i><span>Refreshed!</span>';
+    } else if (options.error) {
+      button.classList.add('error');
+      button.innerHTML = '<i class="fas fa-exclamation-triangle" aria-hidden="true"></i><span>Error</span>';
+    } else {
+      button.innerHTML = originalHTML;
+    }
+  };
+  
+  const resetButtonState = () => {
+    setButtonState(originalLabel, { disabled: false });
+  };
+  
+  try {
+    setButtonState('Refreshing QuickBooks Data...', { loading: true, disabled: true });
+    
+    // Check Quickbooks connection status first
+    const statusResponse = await fetch('/api/quickbooks/status');
+    const status = await statusResponse.json();
+    
+    if (!status.isAuthenticated) {
+      throw new Error('Not connected to QuickBooks. Please connect first.');
+    }
+    
+    console.log('✅ Connected to Quickbooks, fetching transaction report...');
+    
+    // Get transaction report (server will use defaults)
+    const transactionResponse = await fetch('/api/quickbooks/transactions', {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+    
+    const transactionResult = await transactionResponse.json();
+    
+    if (transactionResponse.ok) {
+      console.log('📈 Transaction Report Results:');
+      console.log('==============================');
+      console.log('Message:', transactionResult.message);
+      console.log('Parameters used:', transactionResult.params);
+      
+      if (transactionResult.databaseResults) {
+        console.log('💾 Database Results:');
+        console.log('===================');
+        console.log(`Total transactions: ${transactionResult.databaseResults.total}`);
+        console.log(`Successfully added: ${transactionResult.databaseResults.added}`);
+        console.log(`Skipped (duplicates): ${transactionResult.databaseResults.skipped}`);
+        if (transactionResult.databaseResults.errors.length > 0) {
+          console.log(`Errors: ${transactionResult.databaseResults.errors.length}`);
+          console.log('Error details:', transactionResult.databaseResults.errors);
+        }
+      }
+      
+      // Show success message
+      setButtonState('Refreshed!', { success: true, disabled: false });
+      
+      // Show success notification with database results
+      let notificationMessage = 'QuickBooks data refreshed successfully!';
+      if (transactionResult.databaseResults) {
+        notificationMessage += ` Added ${transactionResult.databaseResults.added} new transactions.`;
+        if (transactionResult.databaseResults.skipped > 0) {
+          notificationMessage += ` Skipped ${transactionResult.databaseResults.skipped} duplicates.`;
+        }
+      }
+      showNotification(notificationMessage, 'success');
+      
+      // Refresh the page to show updated transaction list
+      setTimeout(() => {
+        window.location.reload();
+      }, 2000); // Wait 2 seconds to show the success message
+    } else {
+      throw new Error(transactionResult.error || 'Failed to refresh QuickBooks data');
+    }
+    
+  } catch (error) {
+    console.error('❌ QuickBooks refresh error:', error);
+    
+    // Show error state
+    setButtonState('Error refreshing data', { error: true, disabled: false });
+    
+    showNotification(`QuickBooks refresh failed: ${error.message}`, 'error');
+    
+    // Reset button after 3 seconds
+    setTimeout(() => {
+      resetButtonState();
     }, 3000);
   }
 }
@@ -1096,9 +1577,41 @@ function openEmailDialog(transactionId) {
     document.getElementById('emailAddress').value = '';
   }
   
-  // Reset form
+  // Reset subject and message with default intro
+  const msgEl = document.getElementById('emailMessage');
+  const defaultOrgName = 'your organization';
+  const defaultIntro = `Thank you for your generous donation to ${defaultOrgName}.`;
   document.getElementById('emailSubject').value = 'Your Donation Receipt';
-  document.getElementById('emailMessage').value = '';
+  msgEl.value = defaultIntro;
+  
+  // Try to populate real organization name and update message if user hasn't edited it
+  if (typeof isLoggedInToQuickbooks !== 'undefined' && isLoggedInToQuickbooks) {
+    const initialValue = msgEl.value;
+    fetch('/api/organizations/current')
+      .then(res => res.ok ? res.json() : Promise.reject(res))
+      .then(org => {
+        if (org && org.name) {
+          const updated = `Thank you for your generous donation to ${org.name}.`;
+          if (msgEl.value === initialValue || msgEl.value === defaultIntro) {
+            msgEl.value = updated;
+          }
+        }
+      })
+      .catch(() => {
+        // If current org not available, optionally try list
+        fetch('/api/organizations')
+          .then(r => r.ok ? r.json() : Promise.reject(r))
+          .then(list => {
+            if (Array.isArray(list) && list.length > 0 && list[0].name) {
+              const updated = `Thank you for your generous donation to ${list[0].name}.`;
+              if (msgEl.value === defaultIntro) {
+                msgEl.value = updated;
+              }
+            }
+          })
+          .catch(() => {/* keep default */});
+      });
+  }
   
   // Show modal
   document.getElementById('emailModal').style.display = 'block';
@@ -1473,12 +1986,20 @@ function showSearchSuggestions() {
   );
   
   if (filteredSuggestions.length > 0) {
-    suggestions.innerHTML = filteredSuggestions.map(suggestion => `
-      <div class="search-suggestion" onclick="selectSuggestion('${suggestion}')">
+    // Sanitize suggestions to prevent XSS
+    const sanitize = window.sanitizeForHTML || ((s) => s.replace(/[&<>"']/g, (m) => {
+      const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#x27;' };
+      return map[m];
+    }));
+    suggestions.innerHTML = filteredSuggestions.map(suggestion => {
+      const safeSuggestion = sanitize(suggestion);
+      return `
+      <div class="search-suggestion" onclick="selectSuggestion('${safeSuggestion.replace(/'/g, "\\'")}')">
         <div class="suggestion-type">Time Period</div>
-        <div class="suggestion-text">${suggestion}</div>
+        <div class="suggestion-text">${safeSuggestion}</div>
       </div>
-    `).join('');
+    `;
+    }).join('');
     suggestions.style.display = 'block';
   } else {
     suggestions.style.display = 'none';
@@ -2149,6 +2670,120 @@ function setupEinFormatting() {
   });
 }
 
+// ===== Welcome / Opening Screen helpers =====
+const LOCAL_WELCOME_PREF_KEY = 'showOpeningScreenPreference';
+const LOCAL_WELCOME_PENDING_KEY = 'showOpeningScreenPreferencePending';
+const ONE_YEAR_IN_SECONDS = 60 * 60 * 24 * 365;
+
+function shouldUseDatabaseWelcomePreference() {
+  return typeof isLoggedInToQuickbooks !== 'undefined' && isLoggedInToQuickbooks;
+}
+
+function setLocalValue(key, value) {
+  try {
+    localStorage.setItem(key, value);
+  } catch (error) {
+    console.warn(`⚠️  Unable to persist ${key} in localStorage, using cookie fallback.`, error);
+    document.cookie = `${key}=${encodeURIComponent(value)}; path=/; max-age=${ONE_YEAR_IN_SECONDS}`;
+  }
+}
+
+function getLocalValue(key) {
+  try {
+    const storedValue = localStorage.getItem(key);
+    if (storedValue !== null) {
+      return storedValue;
+    }
+  } catch (error) {
+    console.warn(`⚠️  Unable to read ${key} from localStorage, falling back to cookie.`, error);
+  }
+  
+  const cookieMatch = document.cookie.match(new RegExp(`${key}=([^;]+)`));
+  return cookieMatch ? decodeURIComponent(cookieMatch[1]) : null;
+}
+
+function clearLocalValue(key) {
+  try {
+    localStorage.removeItem(key);
+  } catch (error) {
+    console.warn(`⚠️  Unable to clear ${key} from localStorage, clearing cookie fallback.`, error);
+  }
+  document.cookie = `${key}=; Path=/; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+}
+
+function persistLocalWelcomePreference(showOpeningScreen, markPending = false) {
+  const value = showOpeningScreen ? 'true' : 'false';
+  setLocalValue(LOCAL_WELCOME_PREF_KEY, value);
+  
+  if (markPending) {
+    setLocalValue(LOCAL_WELCOME_PENDING_KEY, value);
+  }
+}
+
+function getLocalWelcomePreference() {
+  const value = getLocalValue(LOCAL_WELCOME_PREF_KEY);
+  if (value === null) {
+    return true; // Default to showing when no preference exists
+  }
+  return value !== 'false';
+}
+
+function getPendingWelcomePreference() {
+  return getLocalValue(LOCAL_WELCOME_PENDING_KEY);
+}
+
+function clearPendingWelcomePreference() {
+  clearLocalValue(LOCAL_WELCOME_PENDING_KEY);
+}
+
+async function fetchDatabaseWelcomePreference() {
+  try {
+    const response = await fetch('/api/options/ShowOpeningScreen');
+    if (response.ok) {
+      const option = await response.json();
+      if (option && typeof option.value !== 'undefined') {
+        return option.value !== 'false';
+      }
+    } else if (response.status === 404) {
+      // No preference stored yet - default to showing
+      return true;
+    } else {
+      console.warn('⚠️  Unexpected response fetching ShowOpeningScreen option:', response.status);
+    }
+  } catch (error) {
+    console.error('❌ Error fetching ShowOpeningScreen option from database:', error);
+  }
+  
+  return true;
+}
+
+async function persistWelcomePreferenceToDatabase(showOpeningScreen) {
+  try {
+    const response = await fetch('/api/options/ShowOpeningScreen', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ value: showOpeningScreen ? 'true' : 'false' })
+    });
+    
+    if (response.ok) {
+      console.log('✅ Opening screen preference saved to database');
+      return true;
+    }
+    
+    if (response.status === 400) {
+      console.log('⏳ No QuickBooks session available, storing preference locally');
+    } else {
+      console.error('❌ Failed to save opening screen preference:', response.status);
+    }
+  } catch (error) {
+    console.error('❌ Error saving opening screen preference:', error);
+  }
+  
+  return false;
+}
+
 // Welcome Modal Functions
 function showWelcomeModal() {
   const welcomeModal = document.getElementById('welcomeModal');
@@ -2167,45 +2802,36 @@ function closeWelcomeModal() {
 async function updateWelcomePreference() {
   const dontShowAgain = document.getElementById('dontShowAgain');
   if (dontShowAgain && dontShowAgain.checked) {
-    try {
-      // Try to save to database via API
-      const response = await fetch('/api/options/ShowOpeningScreen', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ value: 'false' })
-      });
-      
-      if (response.ok) {
-        console.log('✅ Opening screen preference saved to database');
-      } else if (response.status === 400) {
-        // No QuickBooks connection yet, queue the write for later
-        console.log('⏳ No QuickBooks connection - queueing welcome preference for later');
-        sessionStorage.setItem('pendingWelcomePreference', 'false');
-      } else {
-        console.error('❌ Failed to save opening screen preference');
+    const canUseDatabase = shouldUseDatabaseWelcomePreference();
+    
+    if (canUseDatabase) {
+      const saved = await persistWelcomePreferenceToDatabase(false);
+      if (!saved) {
+        persistLocalWelcomePreference(false, true);
       }
-    } catch (error) {
-      console.error('❌ Error saving opening screen preference:', error);
+    } else {
+      // Not logged in yet – store locally and sync once QuickBooks session exists
+      persistLocalWelcomePreference(false, true);
+      console.log('💾 Stored opening screen preference locally until QuickBooks login');
     }
   }
 }
 
 // Check if we should show the welcome dialog on page load
 async function checkWelcomeDialog() {
+  const canUseDatabase = shouldUseDatabaseWelcomePreference();
+  
+  if (canUseDatabase) {
+    // Make sure any locally queued preference is saved before checking the DB
+    await flushPendingWelcomePreference();
+  }
+  
   // Check if welcome dialog has been shown in this session
   const welcomeShown = sessionStorage.getItem('welcomeDialogShown');
   
   // If already shown this session, don't show again
   if (welcomeShown === 'true') {
     console.log('ℹ️  Welcome dialog already shown this session - skipping');
-    return;
-  }
-  
-  // Don't show if user is already logged into QuickBooks
-  if (typeof isLoggedInToQuickbooks !== 'undefined' && isLoggedInToQuickbooks) {
-    console.log('ℹ️  Already logged into QuickBooks - skipping welcome dialog');
     return;
   }
   
@@ -2218,7 +2844,15 @@ async function checkWelcomeDialog() {
     return;
   }
   
-  // Show welcome dialog on first page load of this session (only when not logged in)
+  const shouldShowOpeningScreen = canUseDatabase
+    ? await fetchDatabaseWelcomePreference()
+    : getLocalWelcomePreference();
+  
+  if (!shouldShowOpeningScreen) {
+    console.log('ℹ️  Opening screen disabled by preference - skipping welcome dialog');
+    return;
+  }
+  
   console.log('👋 First page load this session - showing welcome dialog');
   setTimeout(() => {
     showWelcomeModal();
@@ -2229,26 +2863,16 @@ async function checkWelcomeDialog() {
 
 // Flush pending welcome preference to database after QuickBooks login
 async function flushPendingWelcomePreference() {
-  const pendingPreference = sessionStorage.getItem('pendingWelcomePreference');
-  if (pendingPreference) {
+  const pendingPreference = getPendingWelcomePreference();
+  
+  if (pendingPreference && shouldUseDatabaseWelcomePreference()) {
     console.log('🔄 Flushing pending welcome preference to database...');
-    try {
-      const response = await fetch('/api/options/ShowOpeningScreen', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ value: pendingPreference })
-      });
-      
-      if (response.ok) {
-        console.log('✅ Pending welcome preference saved to database');
-        sessionStorage.removeItem('pendingWelcomePreference');
-      } else {
-        console.error('❌ Failed to save pending welcome preference');
-      }
-    } catch (error) {
-      console.error('❌ Error flushing pending welcome preference:', error);
+    const saved = await persistWelcomePreferenceToDatabase(pendingPreference !== 'false');
+    if (saved) {
+      console.log('✅ Pending welcome preference saved to database');
+      clearPendingWelcomePreference();
+    } else {
+      console.warn('⚠️  Unable to flush welcome preference - keeping it queued locally');
     }
   }
 }
@@ -2318,69 +2942,7 @@ async function agreeToTermsAndConnect() {
   window.location.href = '/auth/quickbooks';
 }
 
-// ===== Cookie Consent Banner Functions =====
-function showCookieBanner() {
-  const banner = document.getElementById('cookieBanner');
-  if (banner) {
-    banner.style.display = 'block';
-  }
-}
-
-function hideCookieBanner() {
-  const banner = document.getElementById('cookieBanner');
-  if (banner) {
-    banner.style.display = 'none';
-  }
-}
-
-async function acceptAllCookies() {
-  try {
-    localStorage.setItem('cookieConsent', 'accepted');
-    localStorage.setItem('tosAgreed', 'true');
-    console.log('✅ Cookie consent accepted');
-  } catch (e) {
-    console.error('❌ Error saving cookie consent:', e);
-  }
-
-  await persistTermsAcceptance();
-
-  hideCookieBanner();
-  showNotification('Cookie preferences saved', 'success');
-}
-
-function rejectAllCookies() {
-  try {
-    localStorage.setItem('cookieConsent', 'rejected');
-    localStorage.removeItem('tosAgreed');
-    console.log('✅ Cookie consent rejected');
-  } catch (e) {
-    console.error('❌ Error saving cookie consent:', e);
-  }
-  hideCookieBanner();
-  showNotification('Cookie preferences saved', 'success');
-}
-
-function checkCookieConsent() {
-  try {
-    const consent = localStorage.getItem('cookieConsent');
-    if (!consent) {
-      // No consent choice made yet, show the banner
-      showCookieBanner();
-    } else {
-      // User has already made a choice, hide the banner
-      hideCookieBanner();
-    }
-  } catch (e) {
-    // If localStorage is not available, show the banner anyway
-    console.warn('⚠️ localStorage not available, showing cookie banner');
-    showCookieBanner();
-  }
-}
-
-// Check cookie consent on page load
 document.addEventListener('DOMContentLoaded', function() {
-  checkCookieConsent();
-
   document.querySelectorAll('[data-open-modal="terms"]').forEach(link => {
     link.addEventListener('click', (event) => {
       event.preventDefault();
@@ -2395,18 +2957,6 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   });
 });
-
-async function persistTermsAcceptance() {
-  try {
-    await fetch('/api/options/showtermsofservice', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ value: 'false' })
-    });
-  } catch (e) {
-    console.warn('⚠️ Unable to persist Terms acceptance to server:', e.message);
-  }
-}
 
 // Feedback Modal Functions
 function openFeedbackDialog() {

@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GoBlue Control Center</title>
+  <meta name="csrf-token" content="<%= csrfToken || '' %>">
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/7.0.0/css/all.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/css/goblue.css">
+</head>
+<body>
+  <div class="admin-page">
+    <header class="admin-header">
+      <div>
+        <h1>GoBlue Control Center<span class="beta-badge">Beta</span></h1>
+        <p class="admin-subtitle">Manage companies, donors, and transactions securely.</p>
+      </div>
+      <% if (isAuthenticated) { %>
+        <button id="adminLogoutButton" class="btn btn-ghost">
+          <i class="fas fa-power-off"></i>
+          <span>Logout</span>
+        </button>
+      <% } %>
+    </header>
+
+    <% if (!isAuthenticated) { %>
+      <section class="admin-card login-card">
+        <h2><i class="fas fa-lock"></i> GoBlue Access</h2>
+        <p>Enter the GoBlue password to continue.</p>
+        <form id="adminLoginForm">
+          <label for="adminPassword">Password</label>
+          <input type="password" id="adminPassword" name="password" placeholder="Enter GoBlue password" required autocomplete="current-password">
+          <button type="submit" class="btn btn-primary">
+            <i class="fas fa-unlock"></i>
+            <span>Unlock GoBlue</span>
+          </button>
+          <p class="form-message" id="adminLoginMessage"></p>
+        </form>
+      </section>
+    <% } else { %>
+      <section class="stats-grid">
+        <div class="stat-card">
+          <span class="stat-label">Companies</span>
+          <strong class="stat-value"><%= adminData.companies.length %></strong>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Donors</span>
+          <strong class="stat-value"><%= adminData.donors.length %></strong>
+        </div>
+        <div class="stat-card">
+          <span class="stat-label">Transactions</span>
+          <strong class="stat-value"><%= adminData.transactions.length %></strong>
+        </div>
+      </section>
+
+      <section class="tab-container">
+        <div class="tab-nav" role="tablist">
+          <button class="tab-button active" data-tab="companies" role="tab" aria-selected="true">Companies</button>
+          <button class="tab-button" data-tab="donors" role="tab" aria-selected="false">Donors</button>
+          <button class="tab-button" data-tab="transactions" role="tab" aria-selected="false">Transactions</button>
+          <button class="tab-button" data-tab="beta" role="tab" aria-selected="false">Beta</button>
+          <button class="tab-button" data-tab="password" role="tab" aria-selected="false">Password</button>
+        </div>
+
+        <div class="tab-panels">
+          <div class="tab-panel active" data-tab="companies" role="tabpanel">
+            <div class="admin-panel">
+              <div class="panel-header">
+                <h2>Companies</h2>
+                <span><%= adminData.companies.length %> records</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>EIN</th>
+                      <th>Location</th>
+                      <th>Email</th>
+                      <th>Created</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <% if (adminData.companies.length === 0) { %>
+                      <tr>
+                        <td colspan="5" class="empty-state">No companies are stored.</td>
+                      </tr>
+                    <% } else { %>
+                      <% adminData.companies.forEach(company => { %>
+                        <tr>
+                          <td><%= company.name || '—' %></td>
+                          <td><%= company.ein || '—' %></td>
+                          <td><%= [company.city, company.state].filter(Boolean).join(', ') || '—' %></td>
+                          <td><%= company.email || '—' %></td>
+                          <td><%= company.created_at ? new Date(company.created_at).toLocaleDateString() : '—' %></td>
+                        </tr>
+                      <% }) %>
+                    <% } %>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-panel" data-tab="donors" role="tabpanel">
+            <div class="admin-panel">
+              <div class="panel-header">
+                <h2>Donors</h2>
+                <span><%= adminData.donors.length %> records</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Email</th>
+                      <th>Organization</th>
+                      <th>City</th>
+                      <th>Created</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <% if (adminData.donors.length === 0) { %>
+                      <tr>
+                        <td colspan="5" class="empty-state">No donors are stored.</td>
+                      </tr>
+                    <% } else { %>
+                      <% adminData.donors.forEach(donor => { %>
+                        <tr>
+                          <td><%= donor.name || '—' %></td>
+                          <td><%= donor.email || '—' %></td>
+                          <td><%= donor.organizationName || '—' %></td>
+                          <td><%= [donor.city, donor.state].filter(Boolean).join(', ') || '—' %></td>
+                          <td><%= donor.created_at ? new Date(donor.created_at).toLocaleDateString() : '—' %></td>
+                        </tr>
+                      <% }) %>
+                    <% } %>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-panel" data-tab="transactions" role="tabpanel">
+            <div class="admin-panel">
+              <div class="panel-header">
+                <h2>Transactions</h2>
+                <span><%= adminData.transactions.length %> records</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Date</th>
+                      <th>Donor</th>
+                      <th>Email</th>
+                      <th>Organization</th>
+                      <th>Amount</th>
+                      <th>QB Doc #</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <% if (adminData.transactions.length === 0) { %>
+                      <tr>
+                        <td colspan="5" class="empty-state">No transactions are stored.</td>
+                      </tr>
+                    <% } else { %>
+                      <% adminData.transactions.forEach(transaction => { %>
+                        <tr>
+                          <td><%= transaction.date ? new Date(transaction.date).toLocaleDateString() : '—' %></td>
+                          <td><%= transaction.donor_name || '—' %></td>
+                          <td><%= transaction.donor_email || '—' %></td>
+                          <td><%= transaction.organizationName || '—' %></td>
+                          <td>
+                            <%= new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' })
+                                  .format(parseFloat(transaction.amount) || 0) %>
+                          </td>
+                          <td><%= transaction.qb_docnum || '—' %></td>
+                        </tr>
+                      <% }) %>
+                    <% } %>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-panel" data-tab="beta" role="tabpanel">
+            <div class="admin-panel">
+              <div class="panel-header">
+                <h2>Beta invite codes</h2>
+                <span>Create codes and view login stats</span>
+              </div>
+              <form id="betaCreateCodeForm" class="beta-create-form">
+                <label for="betaCodeInput">New invite code</label>
+                <div class="beta-create-row">
+                  <input type="text" id="betaCodeInput" name="code" placeholder="e.g. BETA-ABC123" required autocomplete="off">
+                  <button type="submit" class="btn btn-primary">
+                    <i class="fas fa-plus"></i>
+                    <span>Create code</span>
+                  </button>
+                </div>
+                <p class="form-message" id="betaCodeMessage"></p>
+              </form>
+              <div class="table-scroll" style="margin-top: 20px;">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Code</th>
+                      <th>Realm ID</th>
+                      <th>Used at</th>
+                      <th>Logins</th>
+                      <th>Last login</th>
+                      <th>Created</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <% const betaCodes = (typeof adminData !== 'undefined' && adminData.betaInviteCodes) ? adminData.betaInviteCodes : []; %>
+                    <% if (betaCodes.length === 0) { %>
+                      <tr>
+                        <td colspan="6" class="empty-state">No invite codes yet. Create one above.</td>
+                      </tr>
+                    <% } else { %>
+                      <% betaCodes.forEach(row => { %>
+                        <tr>
+                          <td><%= row.code || '—' %></td>
+                          <td><%= row.realm_id || '—' %></td>
+                          <td><%= row.used_at ? new Date(row.used_at).toLocaleString() : '—' %></td>
+                          <td><%= row.login_count != null ? row.login_count : 0 %></td>
+                          <td><%= row.last_login_at ? new Date(row.last_login_at).toLocaleString() : '—' %></td>
+                          <td><%= row.created_at ? new Date(row.created_at).toLocaleString() : '—' %></td>
+                        </tr>
+                      <% }) %>
+                    <% } %>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <div class="tab-panel" data-tab="password" role="tabpanel">
+            <div class="admin-panel password-panel">
+              <div class="panel-header">
+                <h2>Change GoBlue Password</h2>
+                <span>Update credentials securely</span>
+              </div>
+              <form id="adminPasswordForm">
+                <label for="currentAdminPassword">Current Password</label>
+                <input type="password" id="currentAdminPassword" name="currentPassword" required autocomplete="current-password" maxlength="600">
+
+                <label for="newAdminPassword">New Password</label>
+                <input type="password" id="newAdminPassword" name="newPassword" minlength="6" maxlength="600" required autocomplete="new-password">
+
+                <button type="submit" class="btn btn-primary">
+                  <i class="fas fa-key"></i>
+                  <span>Update Password</span>
+                </button>
+                <p class="form-message" id="adminPasswordMessage"></p>
+              </form>
+            </div>
+
+            <div class="admin-panel options-panel" style="margin-top: 30px;">
+              <div class="panel-header">
+                <h2>System Options</h2>
+                <span>Manage key/value configuration</span>
+              </div>
+              
+              <div id="optionsList" class="options-list">
+                <p class="info">Loading options...</p>
+              </div>
+
+              <form id="addOptionForm" style="margin-top: 20px; padding-top: 20px; border-top: 1px solid #ddd;">
+                <h3 style="margin-top: 0;">Add New Option</h3>
+                <div style="display: grid; grid-template-columns: 1fr 2fr auto; gap: 10px; align-items: end;">
+                  <div>
+                    <label for="optionKey">Key</label>
+                    <input type="text" id="optionKey" name="key" placeholder="e.g., QUICKBOOKS_CLIENT_ID_SANDBOX" required>
+                  </div>
+                  <div>
+                    <label for="optionValue">Value</label>
+                    <input type="text" id="optionValue" name="value" placeholder="Enter value" required>
+                  </div>
+                  <div>
+                    <button type="submit" class="btn btn-primary">
+                      <i class="fas fa-plus"></i>
+                      <span>Add</span>
+                    </button>
+                  </div>
+                </div>
+                <p class="form-message" id="optionMessage"></p>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+    <% } %>
+  </div>
+
+  <script src="/js/csrf.js"></script>
+  <script src="/js/goblue.js"></script>
+</body>
+</html>
+
